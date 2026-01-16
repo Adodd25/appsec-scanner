@@ -58,6 +58,16 @@ def scan_python_code(target_path):
             text=True
         )
 
+        # Check for errors in stderr (Bandit may output warnings/errors there)
+        stderr_output = result.stderr.strip() if result.stderr else ""
+        if stderr_output and result.returncode not in (0, 1):
+            # Return code 0 = no issues, 1 = issues found, other = error
+            return {
+                "success": False,
+                "error": f"Bandit error: {stderr_output}",
+                "exit_code": result.returncode
+            }
+
         # Bandit returns non-zero exit code when vulnerabilities found
         # Parse JSON output
         output = json.loads(result.stdout) if result.stdout else {}
@@ -65,7 +75,7 @@ def scan_python_code(target_path):
         vulnerabilities = output.get("results", [])
         metrics = output.get("metrics", {})
 
-        return {
+        response = {
             "success": True,
             "tool": "Bandit",
             "target": str(target),
@@ -74,6 +84,12 @@ def scan_python_code(target_path):
             "severity_breakdown": _categorize_by_severity(vulnerabilities),
             "metrics": metrics
         }
+
+        # Include stderr warnings if any (non-fatal)
+        if stderr_output:
+            response["warnings"] = stderr_output
+
+        return response
 
     except json.JSONDecodeError as e:
         return {

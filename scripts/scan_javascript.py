@@ -51,13 +51,16 @@ def scan_npm_dependencies(project_path):
             capture_output=True,
             text=True
         )
-        
+
+        # Check stderr for errors (npm audit uses exit codes for vuln counts, not errors)
+        stderr_output = result.stderr.strip() if result.stderr else ""
+
         audit_data = json.loads(result.stdout) if result.stdout else {}
-        
+
         # Extract vulnerability information
         vulnerabilities = audit_data.get("vulnerabilities", {})
         metadata = audit_data.get("metadata", {})
-        
+
         vuln_list = []
         for package_name, vuln_info in vulnerabilities.items():
             vuln_list.append({
@@ -67,15 +70,15 @@ def scan_npm_dependencies(project_path):
                 "range": vuln_info.get("range", "unknown"),
                 "fixAvailable": vuln_info.get("fixAvailable", False)
             })
-        
+
         severity_counts = {
             "critical": metadata.get("vulnerabilities", {}).get("critical", 0),
             "high": metadata.get("vulnerabilities", {}).get("high", 0),
             "moderate": metadata.get("vulnerabilities", {}).get("moderate", 0),
             "low": metadata.get("vulnerabilities", {}).get("low", 0)
         }
-        
-        return {
+
+        response = {
             "success": True,
             "tool": "npm audit",
             "vulnerabilities": vuln_list,
@@ -83,11 +86,18 @@ def scan_npm_dependencies(project_path):
             "severity_breakdown": severity_counts,
             "dependencies": metadata.get("dependencies", 0)
         }
-        
+
+        # Include stderr warnings if any
+        if stderr_output:
+            response["warnings"] = stderr_output
+
+        return response
+
     except json.JSONDecodeError as e:
         return {
             "success": False,
-            "error": f"Failed to parse npm audit output: {e}"
+            "error": f"Failed to parse npm audit output: {e}",
+            "raw_stderr": result.stderr if result else None
         }
     except Exception as e:
         return {
@@ -165,6 +175,9 @@ def scan_javascript_code(target_path):
             text=True
         )
 
+        # Check stderr for errors/warnings
+        stderr_output = result.stderr.strip() if result.stderr else ""
+
         eslint_data = json.loads(result.stdout) if result.stdout else []
 
         vulnerabilities = []
@@ -192,17 +205,24 @@ def scan_javascript_code(target_path):
                     })
                     total_issues += 1
 
-        return {
+        response = {
             "success": True,
             "tool": "ESLint + security plugin",
             "vulnerabilities": vulnerabilities,
             "total_issues": total_issues
         }
 
+        # Include stderr warnings if any
+        if stderr_output:
+            response["warnings"] = stderr_output
+
+        return response
+
     except json.JSONDecodeError as e:
         return {
             "success": False,
-            "error": f"Failed to parse ESLint output: {e}"
+            "error": f"Failed to parse ESLint output: {e}",
+            "raw_stderr": result.stderr if 'result' in dir() else None
         }
     except Exception as e:
         return {
