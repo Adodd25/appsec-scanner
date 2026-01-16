@@ -218,10 +218,10 @@ class SecurityScanner:
             print("\n🔍 Running Node.js dependency scan (npm audit)...")
             self.results['scans_performed'].append('Dependencies (npm audit)')
             for project_dir in project_info['package_json']:
+                print(f"   Scanning: {project_dir}")
                 result = self.run_scan('scan_javascript.py', 'npm', project_dir)
                 if result['success']:
                     print(result['output'])
-                break  # Only first package.json
         
         # Secret scanning
         if self.config['scan']['secrets']:
@@ -237,8 +237,8 @@ class SecurityScanner:
                             try:
                                 count = int(line.split(':')[1].strip())
                                 self.results['secrets_found'] = count
-                            except:
-                                pass
+                            except (ValueError, IndexError) as e:
+                                print(f"⚠️  Could not parse secrets count: {e}")
         
         # Aggregate results
         self.aggregate_results()
