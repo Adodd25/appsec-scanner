@@ -4,6 +4,7 @@ HTML Report Generator
 Creates beautiful, interactive HTML security reports
 """
 
+import html
 import json
 from datetime import datetime
 from pathlib import Path
@@ -351,29 +352,39 @@ def generate_vulnerability_section(vulnerabilities, title):
     """Generate HTML for vulnerability section"""
     if not vulnerabilities:
         return ""
-    
-    html = [f'<div class="section"><h2>{title}</h2>']
-    
+
+    html_parts = [f'<div class="section"><h2>{html.escape(title)}</h2>']
+
     for vuln in vulnerabilities:
-        severity = vuln.get('severity', 'medium').lower()
+        severity = html.escape(vuln.get('severity', 'medium').lower())
+        vuln_title = html.escape(vuln.get('title', 'Security Issue'))
+        vuln_desc = html.escape(vuln.get('description', ''))
+        vuln_file = html.escape(str(vuln.get('file', 'Unknown')))
+        vuln_line = html.escape(str(vuln.get('line', '?')))
+        vuln_code = html.escape(vuln.get('code', ''))
+        vuln_fix = html.escape(vuln.get('fix', ''))
+
+        code_block = f'<div class="code-block">{vuln_code}</div>' if vuln.get('code') else ''
+        fix_block = f'<div class="recommendations"><h3>Fix:</h3><p>{vuln_fix}</p></div>' if vuln.get('fix') else ''
+
         vuln_html = f'''
         <div class="vulnerability {severity}">
             <div class="vulnerability-header">
-                <div class="vulnerability-title">{vuln.get('title', 'Security Issue')}</div>
+                <div class="vulnerability-title">{vuln_title}</div>
                 <span class="severity-badge {severity}">{severity}</span>
             </div>
             <div class="vulnerability-details">
-                <p>{vuln.get('description', '')}</p>
-                <div class="file-location">📁 {vuln.get('file', 'Unknown')}:{vuln.get('line', '?')}</div>
+                <p>{vuln_desc}</p>
+                <div class="file-location">📁 {vuln_file}:{vuln_line}</div>
             </div>
-            {f'<div class="code-block">{vuln.get("code", "")}</div>' if vuln.get('code') else ''}
-            {f'<div class="recommendations"><h3>Fix:</h3><p>{vuln.get("fix", "")}</p></div>' if vuln.get('fix') else ''}
+            {code_block}
+            {fix_block}
         </div>
         '''
-        html.append(vuln_html)
-    
-    html.append('</div>')
-    return '\n'.join(html)
+        html_parts.append(vuln_html)
+
+    html_parts.append('</div>')
+    return '\n'.join(html_parts)
 
 
 def generate_html_report(scan_results, output_path='security-report.html'):
@@ -440,24 +451,24 @@ def generate_html_report(scan_results, output_path='security-report.html'):
     
     vulnerability_sections = '\n'.join(vuln_sections)
     
-    # Fill template
+    # Fill template - escape user-controllable content
     html_content = HTML_TEMPLATE.format(
-        project_name=scan_results.get('project_name', 'Unknown Project'),
+        project_name=html.escape(scan_results.get('project_name', 'Unknown Project')),
         timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         total_vulns=total_vulns,
         critical_count=critical,
         files_scanned=scan_results.get('files_scanned', 0),
         risk_score=risk_score,
         risk_class=risk_class,
-        risk_description=risk_description,
+        risk_description=html.escape(risk_description),
         severity_chart=severity_chart,
-        executive_summary=exec_summary,
+        executive_summary=html.escape(exec_summary),
         vulnerability_sections=vulnerability_sections,
         recommendations=recommendations_html,
-        target_path=scan_results.get('target_path', 'Unknown'),
-        scan_tools=scan_results.get('scan_tools', 'Bandit, ESLint, npm audit'),
-        scan_duration=scan_results.get('scan_duration', 'N/A'),
-        languages=scan_results.get('languages', 'Python, JavaScript')
+        target_path=html.escape(str(scan_results.get('target_path', 'Unknown'))),
+        scan_tools=html.escape(scan_results.get('scan_tools', 'Bandit, ESLint, npm audit')),
+        scan_duration=html.escape(str(scan_results.get('scan_duration', 'N/A'))),
+        languages=html.escape(scan_results.get('languages', 'Python, JavaScript'))
     )
     
     # Write to file

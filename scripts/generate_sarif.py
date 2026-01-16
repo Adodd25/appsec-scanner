@@ -15,42 +15,69 @@ def generate_sarif_report(scan_results, output_path='security-results.sarif'):
     Generate SARIF format report from scan results
     SARIF spec: https://sarifweb.azurewebsites.net/
     """
-    
+
     sarif = {
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
         "version": "2.1.0",
         "runs": []
     }
-    
-    # Create a run for each scan tool
-    if scan_results.get('python_vulnerabilities'):
+
+    target_path = scan_results.get('target_path', '.')
+
+    # Get all vulnerabilities from the scan results
+    all_vulns = scan_results.get('all_vulnerabilities', [])
+
+    # Also check the categorized lists if all_vulnerabilities is empty
+    if not all_vulns:
+        all_vulns = (
+            scan_results.get('critical_vulnerabilities', []) +
+            scan_results.get('high_vulnerabilities', []) +
+            scan_results.get('medium_vulnerabilities', []) +
+            scan_results.get('low_vulnerabilities', [])
+        )
+
+    # Group vulnerabilities by tool
+    python_vulns = [v for v in all_vulns if v.get('tool') == 'Bandit']
+    js_vulns = [v for v in all_vulns if v.get('tool') in ['ESLint', 'ESLint Security', 'npm audit']]
+    secret_vulns = [v for v in all_vulns if v.get('tool') == 'Secret Scanner']
+
+    # Also check for legacy key names for backwards compatibility
+    if not python_vulns:
+        python_vulns = scan_results.get('python_vulnerabilities', [])
+    if not js_vulns:
+        js_vulns = scan_results.get('javascript_vulnerabilities', [])
+    if not secret_vulns:
+        secret_vulns = scan_results.get('secrets', [])
+
+    # Create a run for each scan tool that has results
+    if python_vulns:
         sarif['runs'].append(create_tool_run(
             tool_name="Bandit",
             tool_version="1.7.5",
-            vulnerabilities=scan_results['python_vulnerabilities'],
-            target_path=scan_results.get('target_path', '.')
+            vulnerabilities=python_vulns,
+            target_path=target_path
         ))
-    
-    if scan_results.get('javascript_vulnerabilities'):
+
+    if js_vulns:
         sarif['runs'].append(create_tool_run(
             tool_name="ESLint Security",
             tool_version="1.0.0",
-            vulnerabilities=scan_results['javascript_vulnerabilities'],
-            target_path=scan_results.get('target_path', '.')
+            vulnerabilities=js_vulns,
+            target_path=target_path
         ))
-    
-    if scan_results.get('secrets'):
+
+    if secret_vulns:
         sarif['runs'].append(create_tool_run(
             tool_name="Secret Scanner",
             tool_version="1.0.0",
-            vulnerabilities=scan_results['secrets'],
-            target_path=scan_results.get('target_path', '.')
+            vulnerabilities=secret_vulns,
+            target_path=target_path
         ))
-    
+
     # Write SARIF file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(sarif, f, indent=2)
-    
+
     return output_path
 
 
@@ -100,6 +127,17 @@ def create_tool_run(tool_name, tool_version, vulnerabilities, target_path):
             })
             rules_added.add(rule_id)
         
+        # Compute relative file path safely
+        file_path = vuln.get('file', 'unknown')
+        if file_path and file_path != 'unknown':
+            try:
+                file_uri = str(Path(file_path).relative_to(target_path))
+            except ValueError:
+                # Path is not relative to target_path, use as-is or just the filename
+                file_uri = str(Path(file_path).name)
+        else:
+            file_uri = 'unknown'
+
         # Add result
         result = {
             "ruleId": rule_id,
@@ -110,8 +148,7 @@ def create_tool_run(tool_name, tool_version, vulnerabilities, target_path):
             "locations": [{
                 "physicalLocation": {
                     "artifactLocation": {
-                        "uri": str(Path(vuln.get('file', 'unknown')).relative_to(target_path) 
-                                  if vuln.get('file') else 'unknown'),
+                        "uri": file_uri,
                         "uriBaseId": "%SRCROOT%"
                     },
                     "region": {

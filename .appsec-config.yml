@@ -1,23 +1,28 @@
 # Application Security Scanner Configuration
 # Copy this file to .appsec-config.yml in your project root
+#
+# NOTE: Options marked [IMPLEMENTED] are currently functional.
+# Options marked [PLANNED] are defined for future implementation.
 
-# Scan Options
+# =============================================================================
+# SCAN OPTIONS [IMPLEMENTED]
+# =============================================================================
 scan:
   # Enable/disable specific scanners
-  python: true
-  javascript: true
-  secrets: true
-  dependencies: true
-  
-  # File patterns to include
+  python: true        # [IMPLEMENTED] Run Bandit Python scanner
+  javascript: true    # [IMPLEMENTED] Run ESLint security scan
+  secrets: true       # [IMPLEMENTED] Run secret detection
+  dependencies: true  # [IMPLEMENTED] Run npm audit for dependencies
+
+  # [PLANNED] File patterns to include/exclude
+  # These are not yet implemented - scanners use their own defaults
   include:
     - "**/*.py"
     - "**/*.js"
     - "**/*.jsx"
     - "**/*.ts"
     - "**/*.tsx"
-  
-  # File patterns to exclude
+
   exclude:
     - "**/node_modules/**"
     - "**/__pycache__/**"
@@ -31,104 +36,119 @@ scan:
     - "**/*.test.js"
     - "**/*.spec.js"
 
-# Severity Thresholds
-# Only report issues at or above this severity
+# =============================================================================
+# SEVERITY THRESHOLDS [PARTIALLY IMPLEMENTED]
+# =============================================================================
 severity:
+  # [PLANNED] Filter to only show issues at or above this severity
   minimum: "low"  # Options: critical, high, medium, low
-  fail_on: "high"  # Exit with error if issues at this level found
 
-# Output Options
+  # [IMPLEMENTED] Exit with error code if issues at this level found
+  fail_on: "high"  # Options: critical, high, medium, low
+
+# =============================================================================
+# OUTPUT OPTIONS [IMPLEMENTED]
+# =============================================================================
 output:
-  # Output formats to generate
+  # [IMPLEMENTED] Output formats to generate (can also use --format CLI flag)
   formats:
     - "text"      # Console output
     - "json"      # JSON file
     - "html"      # HTML report
     - "sarif"     # SARIF for GitHub
-  
-  # Output file paths
+
+  # [IMPLEMENTED] Output file paths
   json_file: "security-results.json"
   html_file: "security-report.html"
   sarif_file: "security-results.sarif"
-  
-  # Verbosity level
+
+  # [PLANNED] Verbosity level
   verbose: false
 
-# Tool-Specific Configuration
+# =============================================================================
+# TOOL-SPECIFIC CONFIGURATION [PLANNED]
+# =============================================================================
+# These options are defined but not yet passed to the underlying tools
 tools:
   bandit:
-    # Bandit severity levels to include
+    # [PLANNED] Bandit confidence levels to include
     confidence: "medium"  # Options: low, medium, high
-    
+
   eslint:
-    # ESLint security rules
+    # [PLANNED] ESLint security rules severity
     rules_severity: "warn"  # Options: error, warn, off
-  
+
   secrets:
-    # Enable specific secret patterns
+    # [PLANNED] Enable specific secret patterns
     patterns:
       - "aws"
       - "github"
       - "api_key"
       - "private_key"
       - "password"
-    
-    # Allowlist for false positives (regex patterns)
+
+    # [PLANNED] Allowlist for false positives (regex patterns)
     allowlist:
       - "example\\.com"
       - "dummy[_-]?key"
       - "test[_-]?password"
 
-# Reporting Options
+# =============================================================================
+# REPORTING OPTIONS [PLANNED]
+# =============================================================================
 reporting:
-  # Include code snippets in reports
+  # [PLANNED] Include code snippets in reports
   include_code: true
-  
-  # Maximum snippet length
+
+  # [PLANNED] Maximum snippet length
   max_snippet_length: 100
-  
-  # Group findings by file or severity
+
+  # [PLANNED] Group findings by file or severity
   group_by: "severity"  # Options: severity, file, type
-  
-  # Include fix suggestions
+
+  # [PLANNED] Include fix suggestions
   include_fixes: true
 
-# Integration Options
+# =============================================================================
+# INTEGRATION OPTIONS [PLANNED]
+# =============================================================================
+# These integrations are not yet implemented
 integration:
-  # GitHub integration
   github:
     enabled: false
     create_issues: false
     label: "security"
-  
-  # Jira integration
+
   jira:
     enabled: false
     project_key: ""
-  
-  # Slack notifications
+
   slack:
     enabled: false
     webhook_url: ""
 
-# Risk Scoring
+# =============================================================================
+# RISK SCORING [IMPLEMENTED]
+# =============================================================================
 risk_scoring:
-  # Weight for each severity level (used to calculate overall risk score)
+  # [IMPLEMENTED] Weight for each severity level (used to calculate risk score)
   weights:
     critical: 25
     high: 10
     medium: 3
     low: 1
-  
-  # Risk thresholds
+
+  # [IMPLEMENTED] Risk thresholds for categorization
   thresholds:
     critical: 75  # Score >= 75 is critical risk
     high: 50      # Score >= 50 is high risk
     medium: 25    # Score >= 25 is medium risk
 
-# False Positive Management
+# =============================================================================
+# FALSE POSITIVE MANAGEMENT [PLANNED]
+# =============================================================================
 false_positives:
-  # Suppress specific findings (by file and line)
+  # [PLANNED] Suppress specific findings (by file and line)
   suppress:
     # Example:
     # - file: "src/legacy/old_auth.py"

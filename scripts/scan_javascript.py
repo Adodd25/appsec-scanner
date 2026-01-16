@@ -7,6 +7,7 @@ Runs npm audit and ESLint with security plugins
 import subprocess
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -50,13 +51,16 @@ def scan_npm_dependencies(project_path):
             capture_output=True,
             text=True
         )
-        
+
+        # Check stderr for errors (npm audit uses exit codes for vuln counts, not errors)
+        stderr_output = result.stderr.strip() if result.stderr else ""
+
         audit_data = json.loads(result.stdout) if result.stdout else {}
-        
+
         # Extract vulnerability information
         vulnerabilities = audit_data.get("vulnerabilities", {})
         metadata = audit_data.get("metadata", {})
-        
+
         vuln_list = []
         for package_name, vuln_info in vulnerabilities.items():
             vuln_list.append({
@@ -66,15 +70,15 @@ def scan_npm_dependencies(project_path):
                 "range": vuln_info.get("range", "unknown"),
                 "fixAvailable": vuln_info.get("fixAvailable", False)
             })
-        
+
         severity_counts = {
             "critical": metadata.get("vulnerabilities", {}).get("critical", 0),
             "high": metadata.get("vulnerabilities", {}).get("high", 0),
             "moderate": metadata.get("vulnerabilities", {}).get("moderate", 0),
             "low": metadata.get("vulnerabilities", {}).get("low", 0)
         }
-        
-        return {
+
+        response = {
             "success": True,
             "tool": "npm audit",
             "vulnerabilities": vuln_list,
@@ -82,11 +86,18 @@ def scan_npm_dependencies(project_path):
             "severity_breakdown": severity_counts,
             "dependencies": metadata.get("dependencies", 0)
         }
-        
+
+        # Include stderr warnings if any
+        if stderr_output:
+            response["warnings"] = stderr_output
+
+        return response
+
     except json.JSONDecodeError as e:
         return {
             "success": False,
-            "error": f"Failed to parse npm audit output: {e}"
+            "error": f"Failed to parse npm audit output: {e}",
+            "raw_stderr": result.stderr if result else None
         }
     except Exception as e:
         return {
@@ -142,51 +153,76 @@ def scan_javascript_code(target_path):
             "es2021": True
         }
     }
-    
-    config_file = Path("/tmp/eslint_security_config.json")
-    with open(config_file, 'w') as f:
-        json.dump(eslint_config, f)
-    
+
+    # Use a unique temporary file to avoid race conditions with concurrent scans
     try:
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.json',
+            prefix='eslint_security_config_',
+            delete=False
+        ) as config_file:
+            json.dump(eslint_config, config_file)
+            config_file_path = config_file.name
+
         # Run ESLint with security plugin
         result = subprocess.run(
-            ["npx", "eslint", 
-             "-c", str(config_file),
+            ["npx", "eslint",
+             "-c", config_file_path,
              "--format", "json",
              str(target)],
             capture_output=True,
             text=True
         )
-        
+
+        # Check stderr for errors/warnings
+        stderr_output = result.stderr.strip() if result.stderr else ""
+
         eslint_data = json.loads(result.stdout) if result.stdout else []
-        
+
         vulnerabilities = []
         total_issues = 0
-        
+
         for file_result in eslint_data:
             for message in file_result.get("messages", []):
                 if "security/" in message.get("ruleId", ""):
+                    # ESLint severity: 0=off, 1=warn, 2=error
+                    eslint_severity = message.get("severity", 1)
+                    if eslint_severity == 2:
+                        severity = "high"
+                    elif eslint_severity == 1:
+                        severity = "medium"
+                    else:
+                        severity = "low"
+
                     vulnerabilities.append({
                         "file": file_result.get("filePath", "unknown"),
                         "line": message.get("line", 0),
                         "column": message.get("column", 0),
-                        "severity": "high" if message.get("severity") == 2 else "medium",
+                        "severity": severity,
                         "message": message.get("message", ""),
                         "ruleId": message.get("ruleId", "")
                     })
                     total_issues += 1
-        
-        return {
+
+        response = {
             "success": True,
             "tool": "ESLint + security plugin",
             "vulnerabilities": vulnerabilities,
             "total_issues": total_issues
         }
-        
+
+        # Include stderr warnings if any
+        if stderr_output:
+            response["warnings"] = stderr_output
+
+        return response
+
     except json.JSONDecodeError as e:
         return {
             "success": False,
-            "error": f"Failed to parse ESLint output: {e}"
+            "error": f"Failed to parse ESLint output: {e}",
+            "raw_stderr": result.stderr if 'result' in dir() else None
         }
     except Exception as e:
         return {
@@ -195,8 +231,10 @@ def scan_javascript_code(target_path):
         }
     finally:
         # Clean up config file
-        if config_file.exists():
-            config_file.unlink()
+        try:
+            Path(config_file_path).unlink()
+        except (NameError, OSError):
+            pass  # File may not exist or config_file_path not defined
 
 
 def format_npm_results(results):

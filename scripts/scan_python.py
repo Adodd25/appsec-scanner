@@ -50,21 +50,32 @@ def scan_python_code(target_path):
     ]
     cmd = [c for c in cmd if c]  # Remove empty strings
     
+    result = None
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True
         )
-        
+
+        # Check for errors in stderr (Bandit may output warnings/errors there)
+        stderr_output = result.stderr.strip() if result.stderr else ""
+        if stderr_output and result.returncode not in (0, 1):
+            # Return code 0 = no issues, 1 = issues found, other = error
+            return {
+                "success": False,
+                "error": f"Bandit error: {stderr_output}",
+                "exit_code": result.returncode
+            }
+
         # Bandit returns non-zero exit code when vulnerabilities found
         # Parse JSON output
         output = json.loads(result.stdout) if result.stdout else {}
-        
+
         vulnerabilities = output.get("results", [])
         metrics = output.get("metrics", {})
-        
-        return {
+
+        response = {
             "success": True,
             "tool": "Bandit",
             "target": str(target),
@@ -73,17 +84,25 @@ def scan_python_code(target_path):
             "severity_breakdown": _categorize_by_severity(vulnerabilities),
             "metrics": metrics
         }
-        
+
+        # Include stderr warnings if any (non-fatal)
+        if stderr_output:
+            response["warnings"] = stderr_output
+
+        return response
+
     except json.JSONDecodeError as e:
         return {
             "success": False,
             "error": f"Failed to parse Bandit output: {e}",
-            "raw_output": result.stdout if result else None
+            "raw_output": result.stdout if result else None,
+            "raw_stderr": result.stderr if result else None
         }
     except Exception as e:
         return {
             "success": False,
-            "error": f"Scan failed: {str(e)}"
+            "error": f"Scan failed: {str(e)}",
+            "raw_stderr": result.stderr if result else None
         }
 
 
