@@ -50,20 +50,21 @@ def scan_python_code(target_path):
     ]
     cmd = [c for c in cmd if c]  # Remove empty strings
     
+    result = None
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True
         )
-        
+
         # Bandit returns non-zero exit code when vulnerabilities found
         # Parse JSON output
         output = json.loads(result.stdout) if result.stdout else {}
-        
+
         vulnerabilities = output.get("results", [])
         metrics = output.get("metrics", {})
-        
+
         return {
             "success": True,
             "tool": "Bandit",
@@ -73,17 +74,19 @@ def scan_python_code(target_path):
             "severity_breakdown": _categorize_by_severity(vulnerabilities),
             "metrics": metrics
         }
-        
+
     except json.JSONDecodeError as e:
         return {
             "success": False,
             "error": f"Failed to parse Bandit output: {e}",
-            "raw_output": result.stdout if result else None
+            "raw_output": result.stdout if result else None,
+            "raw_stderr": result.stderr if result else None
         }
     except Exception as e:
         return {
             "success": False,
-            "error": f"Scan failed: {str(e)}"
+            "error": f"Scan failed: {str(e)}",
+            "raw_stderr": result.stderr if result else None
         }
 
 

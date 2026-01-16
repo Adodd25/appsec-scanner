@@ -10,6 +10,7 @@ Comprehensive security scanning with advanced features:
 - OWASP Top 10 coverage
 """
 
+import copy
 import subprocess
 import sys
 import json
@@ -17,7 +18,21 @@ import time
 import yaml
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Any
+
+
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deep merge two dictionaries. Values from override take precedence.
+    Nested dictionaries are merged recursively rather than replaced.
+    """
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
 
 
 class SecurityScanner:
@@ -76,12 +91,13 @@ class SecurityScanner:
             try:
                 with open(config_file, 'r') as f:
                     user_config = yaml.safe_load(f)
-                    default_config.update(user_config)
+                    if user_config:
+                        default_config = deep_merge(default_config, user_config)
                     print(f"✅ Loaded configuration from {config_file}")
             except Exception as e:
                 print(f"⚠️  Could not load config file: {e}")
                 print("   Using default configuration")
-        
+
         return default_config
     
     def detect_project_type(self):
@@ -150,35 +166,6 @@ class SecurityScanner:
                 'output': f'Error running scanner: {str(e)}',
                 'exit_code': 2
             }
-    
-    def parse_bandit_output(self, output):
-        """Parse Bandit output for vulnerabilities"""
-        vulnerabilities = []
-        lines = output.split('\n')
-        
-        current_vuln = None
-        for line in lines:
-            if '>> Issue:' in line:
-                if current_vuln:
-                    vulnerabilities.append(current_vuln)
-                current_vuln = {'tool': 'Bandit'}
-            
-            if current_vuln:
-                if 'Severity:' in line:
-                    current_vuln['severity'] = line.split(':')[1].strip().lower()
-                elif 'Location:' in line:
-                    parts = line.split(':')
-                    if len(parts) >= 2:
-                        current_vuln['file'] = parts[0].replace('Location:', '').strip()
-                        if len(parts) >= 3:
-                            current_vuln['line'] = parts[1]
-                elif '>> Issue:' in line:
-                    current_vuln['title'] = line.replace('>> Issue:', '').strip()
-        
-        if current_vuln:
-            vulnerabilities.append(current_vuln)
-        
-        return vulnerabilities
     
     def aggregate_results(self):
         """Aggregate and categorize all vulnerabilities"""
@@ -391,12 +378,17 @@ def main():
     # Parse command line options
     config_path = None
     skip_options = {}
-    
+    output_formats = None
+
     i = 2
     while i < len(sys.argv):
         arg = sys.argv[i]
         if arg == '--config' and i + 1 < len(sys.argv):
             config_path = sys.argv[i + 1]
+            i += 2
+        elif arg == '--format' and i + 1 < len(sys.argv):
+            # Parse comma-separated formats (e.g., "html,json")
+            output_formats = [f.strip().lower() for f in sys.argv[i + 1].split(',')]
             i += 2
         elif arg == '--skip-python':
             skip_options['python'] = False
@@ -412,13 +404,17 @@ def main():
             i += 1
         else:
             i += 1
-    
+
     # Create scanner
     scanner = SecurityScanner(target_path, config_path)
-    
+
     # Apply command line skip options
     if skip_options:
         scanner.config['scan'].update(skip_options)
+
+    # Apply command line format options
+    if output_formats:
+        scanner.config['output']['formats'] = output_formats
     
     # Run comprehensive scan
     results = scanner.run_comprehensive_scan()
