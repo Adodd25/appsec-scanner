@@ -1,0 +1,12 @@
+# Application Security Scanner - Python Dependencies
+
+# Core security scanning tools
+bandit>=1.7.0
+
+# Configuration file support
+pyyaml>=6.0
+
+# Optional: Additional security tools
+# Uncomment if you want to use these tools
+# safety>=2.0.0
+# pip-audit>=2.0.0

@@ -1,0 +1,136 @@
+# Application Security Scanner Configuration
+# Copy this file to .appsec-config.yml in your project root
+
+# Scan Options
+scan:
+  # Enable/disable specific scanners
+  python: true
+  javascript: true
+  secrets: true
+  dependencies: true
+  
+  # File patterns to include
+  include:
+    - "**/*.py"
+    - "**/*.js"
+    - "**/*.jsx"
+    - "**/*.ts"
+    - "**/*.tsx"
+  
+  # File patterns to exclude
+  exclude:
+    - "**/node_modules/**"
+    - "**/__pycache__/**"
+    - "**/venv/**"
+    - "**/env/**"
+    - "**/.git/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/test/**"
+    - "**/tests/**"
+    - "**/*.test.js"
+    - "**/*.spec.js"
+
+# Severity Thresholds
+# Only report issues at or above this severity
+severity:
+  minimum: "low"  # Options: critical, high, medium, low
+  fail_on: "high"  # Exit with error if issues at this level found
+
+# Output Options
+output:
+  # Output formats to generate
+  formats:
+    - "text"      # Console output
+    - "json"      # JSON file
+    - "html"      # HTML report
+    - "sarif"     # SARIF for GitHub
+  
+  # Output file paths
+  json_file: "security-results.json"
+  html_file: "security-report.html"
+  sarif_file: "security-results.sarif"
+  
+  # Verbosity level
+  verbose: false
+
+# Tool-Specific Configuration
+tools:
+  bandit:
+    # Bandit severity levels to include
+    confidence: "medium"  # Options: low, medium, high
+    
+  eslint:
+    # ESLint security rules
+    rules_severity: "warn"  # Options: error, warn, off
+  
+  secrets:
+    # Enable specific secret patterns
+    patterns:
+      - "aws"
+      - "github"
+      - "api_key"
+      - "private_key"
+      - "password"
+    
+    # Allowlist for false positives (regex patterns)
+    allowlist:
+      - "example\\.com"
+      - "dummy[_-]?key"
+      - "test[_-]?password"
+
+# Reporting Options
+reporting:
+  # Include code snippets in reports
+  include_code: true
+  
+  # Maximum snippet length
+  max_snippet_length: 100
+  
+  # Group findings by file or severity
+  group_by: "severity"  # Options: severity, file, type
+  
+  # Include fix suggestions
+  include_fixes: true
+
+# Integration Options
+integration:
+  # GitHub integration
+  github:
+    enabled: false
+    create_issues: false
+    label: "security"
+  
+  # Jira integration
+  jira:
+    enabled: false
+    project_key: ""
+  
+  # Slack notifications
+  slack:
+    enabled: false
+    webhook_url: ""
+
+# Risk Scoring
+risk_scoring:
+  # Weight for each severity level (used to calculate overall risk score)
+  weights:
+    critical: 25
+    high: 10
+    medium: 3
+    low: 1
+  
+  # Risk thresholds
+  thresholds:
+    critical: 75  # Score >= 75 is critical risk
+    high: 50      # Score >= 50 is high risk
+    medium: 25    # Score >= 25 is medium risk
+
+# False Positive Management
+false_positives:
+  # Suppress specific findings (by file and line)
+  suppress:
+    # Example:
+    # - file: "src/legacy/old_auth.py"
+    #   line: 42
+    #   reason: "Legacy code, scheduled for removal in Q2"

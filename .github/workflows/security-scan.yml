@@ -1,0 +1,130 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run weekly on Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install Python security tools
+        run: |
+          pip install bandit safety pip-audit
+      
+      - name: Install JavaScript security tools
+        run: |
+          npm install -g eslint eslint-plugin-security
+      
+      - name: Install project dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f package.json ]; then npm install; fi
+      
+      - name: Run Python security scan (Bandit)
+        continue-on-error: true
+        run: |
+          if ls *.py 2>/dev/null || find . -name "*.py" -type f -print -quit | grep -q .; then
+            bandit -r . -f json -o bandit-report.json || true
+            bandit -r . || true
+          else
+            echo "No Python files found, skipping Python scan"
+          fi
+      
+      - name: Run Python dependency check (Safety)
+        continue-on-error: true
+        run: |
+          if [ -f requirements.txt ]; then
+            safety check --json > safety-report.json || true
+            safety check || true
+          else
+            echo "No requirements.txt found, skipping Safety check"
+          fi
+      
+      - name: Run npm audit
+        continue-on-error: true
+        run: |
+          if [ -f package.json ]; then
+            npm audit --json > npm-audit-report.json || true
+            npm audit || true
+          else
+            echo "No package.json found, skipping npm audit"
+          fi
+      
+      - name: Run JavaScript security scan (ESLint)
+        continue-on-error: true
+        run: |
+          if ls *.js 2>/dev/null || find . -name "*.js" -type f -print -quit | grep -q .; then
+            npx eslint . --ext .js,.jsx --format json > eslint-report.json || true
+            npx eslint . --ext .js,.jsx || true
+          else
+            echo "No JavaScript files found, skipping ESLint scan"
+          fi
+      
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scan-results
+          path: |
+            bandit-report.json
+            safety-report.json
+            npm-audit-report.json
+            eslint-report.json
+          retention-days: 30
+      
+      - name: Create summary comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            let comment = '## 🛡️ Security Scan Results\n\n';
+            
+            // Read and summarize results
+            try {
+              if (fs.existsSync('bandit-report.json')) {
+                const bandit = JSON.parse(fs.readFileSync('bandit-report.json', 'utf8'));
+                const results = bandit.results || [];
+                comment += `### Python (Bandit)\n- Issues found: ${results.length}\n\n`;
+              }
+            } catch (e) {}
+            
+            try {
+              if (fs.existsSync('npm-audit-report.json')) {
+                const npm = JSON.parse(fs.readFileSync('npm-audit-report.json', 'utf8'));
+                const vulns = npm.metadata?.vulnerabilities || {};
+                const total = vulns.total || 0;
+                comment += `### npm Dependencies\n- Vulnerabilities: ${total}\n\n`;
+              }
+            } catch (e) {}
+            
+            comment += '📊 See artifacts for detailed reports.\n';
+            
+            // Post comment
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
