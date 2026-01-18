@@ -40,7 +40,9 @@ SECRET_PATTERNS = {
         "case_sensitive": False  # "api_key" can be any case
     },
     "Private Key": {
-        "pattern": r"-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----",
+        # Pattern requires actual key content (base64 chars) after the header
+        # This prevents matching the pattern definition itself
+        "pattern": r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----\s*\n[A-Za-z0-9+/=\s]{20,}",
         "severity": "critical",
         "description": "Private cryptographic key detected",
         "case_sensitive": True  # PEM headers are exact
@@ -106,13 +108,7 @@ SECRET_PATTERNS = {
         "case_sensitive": False  # URL schemes can vary
     },
     # Note: Firebase URLs (*.firebaseio.com) are NOT secrets - they're public endpoints
-    # Only the Firebase Admin SDK private key is sensitive
-    "Firebase Private Key": {
-        "pattern": r"-----BEGIN PRIVATE KEY-----[^-]+-----END PRIVATE KEY-----",
-        "severity": "critical",
-        "description": "Firebase/GCP service account private key detected",
-        "case_sensitive": True
-    },
+    # Firebase/GCP private keys are caught by the generic "Private Key" pattern above
     "OAuth Token": {
         "pattern": r"access[_-]?token['\"]?\s*[:=]\s*['\"]([0-9a-zA-Z\-._~+/]{20,})['\"]",
         "severity": "high",
@@ -133,7 +129,15 @@ SCANNABLE_EXTENSIONS = {
 SKIP_PATTERNS = {
     'node_modules', '.git', '.svn', '__pycache__', 'venv', 'env',
     '.venv', 'dist', 'build', '.pytest_cache', 'coverage',
-    '.mypy_cache', '.tox', 'htmlcov', 'site-packages'
+    '.mypy_cache', '.tox', 'htmlcov', 'site-packages',
+    # Skip documentation that may contain example vulnerable code
+    'references', 'docs', 'examples', 'test_fixtures', 'fixtures'
+}
+
+# Files to skip (contain patterns/examples, not real secrets)
+SKIP_FILES = {
+    'vulnerability_patterns.md', 'owasp_top10.md',
+    'scan_secrets.py',  # Contains the detection patterns themselves
 }
 
 
@@ -143,6 +147,10 @@ def should_scan_file(file_path: Path) -> bool:
     for part in file_path.parts:
         if part in SKIP_PATTERNS:
             return False
+
+    # Check if file itself should be skipped (contains patterns/examples)
+    if file_path.name in SKIP_FILES:
+        return False
 
     # Check extension
     return file_path.suffix.lower() in SCANNABLE_EXTENSIONS
