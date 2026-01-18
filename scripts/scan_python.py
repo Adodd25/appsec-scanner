@@ -109,13 +109,128 @@ def scan_python_code(target_path):
 def _categorize_by_severity(vulnerabilities):
     """Categorize vulnerabilities by severity level"""
     severity_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
-    
+
     for vuln in vulnerabilities:
         severity = vuln.get("issue_severity", "UNKNOWN").upper()
         if severity in severity_counts:
             severity_counts[severity] += 1
-    
+
     return severity_counts
+
+
+def scan_python_dependencies(target_path):
+    """
+    Scan Python dependencies for known vulnerabilities using pip-audit.
+
+    Args:
+        target_path: Path to directory containing requirements.txt or pyproject.toml
+
+    Returns:
+        dict: Audit results with vulnerabilities
+    """
+    target = Path(target_path)
+
+    # Find requirements files
+    req_files = []
+    if target.is_file() and target.name in ['requirements.txt', 'pyproject.toml']:
+        req_files.append(target)
+    elif target.is_dir():
+        for name in ['requirements.txt', 'requirements-dev.txt', 'pyproject.toml']:
+            req_file = target / name
+            if req_file.exists():
+                req_files.append(req_file)
+
+    if not req_files:
+        return {
+            "success": True,
+            "tool": "pip-audit",
+            "vulnerabilities": [],
+            "total_issues": 0,
+            "message": "No requirements.txt or pyproject.toml found"
+        }
+
+    # Check if pip-audit is installed
+    try:
+        subprocess.run(
+            ["pip-audit", "--version"],
+            capture_output=True,
+            check=True
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {
+            "success": False,
+            "error": "pip-audit is not installed. Install with: pip install pip-audit"
+        }
+
+    all_vulns = []
+
+    for req_file in req_files:
+        try:
+            # Run pip-audit with JSON output
+            cmd = ["pip-audit", "--format", "json"]
+
+            if req_file.name == 'requirements.txt':
+                cmd.extend(["--requirement", str(req_file)])
+            else:
+                # For pyproject.toml, run in directory
+                cmd.extend(["--path", str(req_file.parent)])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 minute timeout
+            )
+
+            if result.stdout:
+                audit_data = json.loads(result.stdout)
+
+                # pip-audit returns list of dependencies with vulns
+                for dep in audit_data:
+                    if dep.get("vulns"):
+                        for vuln in dep["vulns"]:
+                            # Map CVSS to severity
+                            cvss = vuln.get("fix_versions", [])
+                            vuln_id = vuln.get("id", "UNKNOWN")
+
+                            # Determine severity from vuln ID prefix or aliases
+                            severity = "medium"
+                            aliases = vuln.get("aliases", [])
+                            if any("GHSA" in a for a in aliases):
+                                # GitHub Security Advisories - check if critical
+                                severity = "high"
+                            if "CRITICAL" in vuln_id.upper():
+                                severity = "critical"
+
+                            all_vulns.append({
+                                "package": dep.get("name", "unknown"),
+                                "installed_version": dep.get("version", "unknown"),
+                                "vulnerability_id": vuln_id,
+                                "severity": severity,
+                                "description": vuln.get("description", f"Vulnerability {vuln_id}"),
+                                "fix_versions": vuln.get("fix_versions", []),
+                                "aliases": aliases,
+                                "source_file": str(req_file)
+                            })
+
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "error": f"pip-audit timed out scanning {req_file}"
+            }
+        except json.JSONDecodeError as e:
+            # pip-audit may return non-JSON on error
+            pass
+        except Exception as e:
+            pass  # Continue with other files
+
+    return {
+        "success": True,
+        "tool": "pip-audit",
+        "vulnerabilities": all_vulns,
+        "total_issues": len(all_vulns),
+        "files_scanned": [str(f) for f in req_files]
+    }
 
 
 def format_results(results):
@@ -161,19 +276,36 @@ def format_results(results):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Python Security Scanner using Bandit")
+    parser = argparse.ArgumentParser(description="Python Security Scanner")
+    parser.add_argument("scan_type", nargs="?", default="code",
+                        choices=["code", "deps"],
+                        help="'code' for Bandit scan or 'deps' for pip-audit")
     parser.add_argument("path", help="Path to Python file or directory to scan")
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
     args = parser.parse_args()
 
-    results = scan_python_code(args.path)
-
-    if args.json:
-        # Output structured JSON for orchestrator
-        print(json.dumps(results))
+    if args.scan_type == "deps":
+        results = scan_python_dependencies(args.path)
+        if args.json:
+            print(json.dumps(results))
+        else:
+            # Simple text output for deps
+            if results.get("success"):
+                print(f"\n{'='*60}")
+                print(f"📦 Python Dependency Security Scan (pip-audit)")
+                print(f"{'='*60}")
+                print(f"Vulnerabilities Found: {results['total_issues']}")
+                for vuln in results.get('vulnerabilities', []):
+                    print(f"  - {vuln['package']} {vuln['installed_version']}: {vuln['vulnerability_id']}")
+            else:
+                print(f"Error: {results.get('error')}")
     else:
-        print(format_results(results))
+        results = scan_python_code(args.path)
+        if args.json:
+            print(json.dumps(results))
+        else:
+            print(format_results(results))
 
     # Exit with appropriate code
     if results.get("success") and results.get("total_issues", 0) > 0:

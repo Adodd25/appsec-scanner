@@ -103,6 +103,8 @@ class SecurityScanner:
     
     def detect_project_type(self):
         """Detect what types of code/projects exist"""
+        import fnmatch
+
         project_info = {
             'python': False,
             'javascript': False,
@@ -114,17 +116,38 @@ class SecurityScanner:
             'package_json': []
         }
 
-        # Get exclude patterns from config
+        # Get exclude patterns from config (glob patterns like "**/node_modules/**")
         exclude_patterns = self.config.get('scan', {}).get('exclude', [])
-        exclude_dirs = {'node_modules', '.git', '__pycache__', 'venv', 'env',
-                        '.venv', 'dist', 'build', '.pytest_cache'}
+
+        # Default directories to always exclude
+        default_exclude_dirs = {'node_modules', '.git', '__pycache__', 'venv', 'env',
+                                '.venv', 'dist', 'build', '.pytest_cache', '.mypy_cache',
+                                'coverage', 'htmlcov', '.tox', 'site-packages'}
 
         def should_include(path: Path) -> bool:
             """Check if path should be included based on exclude patterns"""
             path_str = str(path)
+
+            # Check default directory exclusions
             for part in path.parts:
-                if part in exclude_dirs:
+                if part in default_exclude_dirs:
                     return False
+
+            # Check config glob patterns
+            for pattern in exclude_patterns:
+                # Convert glob pattern to work with fnmatch
+                # Handle patterns like "**/node_modules/**"
+                clean_pattern = pattern.strip()
+                if fnmatch.fnmatch(path_str, clean_pattern):
+                    return False
+                # Also check against relative path
+                try:
+                    rel_path = str(path.relative_to(self.target_path))
+                    if fnmatch.fnmatch(rel_path, clean_pattern):
+                        return False
+                except ValueError:
+                    pass
+
             return True
 
         # Search for files
@@ -225,23 +248,50 @@ class SecurityScanner:
     def add_vulnerabilities(self, vulns: List[Dict], tool: str):
         """Add vulnerabilities from a scanner to the aggregated results"""
         for vuln in vulns:
+            # Handle different severity field names from different tools
+            # Bandit uses 'issue_severity', ESLint uses 'severity'
+            severity = vuln.get('severity') or vuln.get('issue_severity') or 'medium'
+
             normalized = {
                 'tool': tool,
-                'severity': self.normalize_severity(vuln.get('severity', 'medium')),
+                'severity': self.normalize_severity(severity),
                 'title': vuln.get('title', vuln.get('test_name', vuln.get('ruleId', 'Security Issue'))),
                 'description': vuln.get('description', vuln.get('issue_text', vuln.get('message', ''))),
                 'file': vuln.get('file', vuln.get('filename', 'unknown')),
                 'line': vuln.get('line', vuln.get('line_number', 0)),
+                'column': vuln.get('column', vuln.get('col_offset', 1)),
                 'code': vuln.get('code', vuln.get('line_content', '')),
-                'fix': vuln.get('fix', vuln.get('more_info', ''))
+                'fix': vuln.get('fix', vuln.get('more_info', '')),
+                'rule_id': vuln.get('rule_id', vuln.get('test_id', vuln.get('ruleId', '')))
             }
             self.results['all_vulnerabilities'].append(normalized)
     
+    def _vulnerability_fingerprint(self, vuln: Dict) -> str:
+        """Create a unique fingerprint for a vulnerability to detect duplicates"""
+        # Fingerprint based on file, line, tool, and rule/title
+        return f"{vuln.get('file', '')}:{vuln.get('line', 0)}:{vuln.get('tool', '')}:{vuln.get('rule_id', vuln.get('title', ''))}"
+
+    def deduplicate_vulnerabilities(self):
+        """Remove duplicate vulnerabilities based on fingerprinting"""
+        seen = set()
+        unique_vulns = []
+
+        for vuln in self.results['all_vulnerabilities']:
+            fingerprint = self._vulnerability_fingerprint(vuln)
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                unique_vulns.append(vuln)
+
+        self.results['all_vulnerabilities'] = unique_vulns
+
     def aggregate_results(self):
         """Aggregate and categorize all vulnerabilities"""
+        # First deduplicate
+        self.deduplicate_vulnerabilities()
+
         for vuln in self.results['all_vulnerabilities']:
             severity = vuln.get('severity', 'medium').lower()
-            
+
             if severity in ['critical']:
                 self.results['critical_vulnerabilities'].append(vuln)
                 self.results['critical_count'] += 1
@@ -257,11 +307,19 @@ class SecurityScanner:
     
     def _run_python_scan(self, project_info: Dict) -> Tuple[str, Dict]:
         """Run Python security scan - designed for parallel execution"""
-        result = self.run_scan('scan_python.py', str(self.target_path))
+        result = self.run_scan('scan_python.py', 'code', str(self.target_path))
         return ('python', {
             'result': result,
             'file_count': len(project_info['python_files']),
             'scan_name': 'Python (Bandit)'
+        })
+
+    def _run_pip_audit(self) -> Tuple[str, Dict]:
+        """Run pip-audit for Python dependency scanning - designed for parallel execution"""
+        result = self.run_scan('scan_python.py', 'deps', str(self.target_path))
+        return ('pip_audit', {
+            'result': result,
+            'scan_name': 'Python Dependencies (pip-audit)'
         })
 
     def _run_js_scan(self, project_info: Dict) -> Tuple[str, Dict]:
@@ -302,17 +360,21 @@ class SecurityScanner:
         # Prepare scan tasks for parallel execution
         scan_tasks = []
 
-        if project_info['python'] and self.config['scan']['python']:
+        if project_info['python'] and self.config['scan'].get('python', True):
             scan_tasks.append(('python', lambda: self._run_python_scan(project_info)))
 
-        if project_info['javascript'] and self.config['scan']['javascript']:
+        # Python dependency scanning with pip-audit
+        if project_info['python'] and self.config['scan'].get('dependencies', True):
+            scan_tasks.append(('pip_audit', lambda: self._run_pip_audit()))
+
+        if project_info['javascript'] and self.config['scan'].get('javascript', True):
             scan_tasks.append(('javascript', lambda: self._run_js_scan(project_info)))
 
-        if self.config['scan']['secrets']:
+        if self.config['scan'].get('secrets', True):
             scan_tasks.append(('secrets', lambda: self._run_secrets_scan()))
 
         # npm scans for each package.json (these can also run in parallel)
-        if project_info['nodejs'] and self.config['scan']['dependencies']:
+        if project_info['nodejs'] and self.config['scan'].get('dependencies', True):
             for project_dir in project_info['package_json']:
                 # Capture project_dir in closure
                 scan_tasks.append(('npm', lambda pd=project_dir: self._run_npm_scan(pd)))
@@ -349,6 +411,34 @@ class SecurityScanner:
                         print(f"✅ {data['scan_name']}: Found {len(vulns)} issues in {data['file_count']} files")
                     else:
                         print(f"⚠️  JavaScript scan failed: {result['data'].get('error', 'Unknown error')}")
+
+                elif scan_type == 'pip_audit':
+                    result = data['result']
+                    self.results['scans_performed'].append(data['scan_name'])
+                    if result['success']:
+                        vulns = result['data'].get('vulnerabilities', [])
+                        for vuln in vulns:
+                            fix_versions = vuln.get('fix_versions', [])
+                            fix_str = f"Upgrade to: {', '.join(fix_versions)}" if fix_versions else "No fix available"
+                            self.results['all_vulnerabilities'].append({
+                                'tool': 'pip-audit',
+                                'severity': self.normalize_severity(vuln.get('severity', 'medium')),
+                                'title': f"Vulnerable package: {vuln.get('package', 'unknown')}",
+                                'description': f"{vuln.get('vulnerability_id', '')}: {vuln.get('description', '')}",
+                                'file': vuln.get('source_file', 'requirements.txt'),
+                                'line': 0,
+                                'code': f"{vuln.get('package')}=={vuln.get('installed_version')}",
+                                'fix': fix_str,
+                                'rule_id': vuln.get('vulnerability_id', '')
+                            })
+                        self.results['outdated_dependencies'] += len(vulns)
+                        print(f"✅ pip-audit: Found {len(vulns)} vulnerable packages")
+                    else:
+                        error = result['data'].get('error', 'Unknown error')
+                        if 'not installed' in error:
+                            print(f"⚠️  pip-audit not installed (skipping Python dependency scan)")
+                        else:
+                            print(f"⚠️  pip-audit failed: {error}")
 
                 elif scan_type == 'npm':
                     result = data['result']
@@ -465,19 +555,53 @@ class SecurityScanner:
         print(f"{'='*70}\n")
     
     def calculate_risk_score(self):
-        """Calculate overall risk score"""
-        weights = self.config.get('risk_scoring', {}).get('weights', {
-            'critical': 25, 'high': 10, 'medium': 3, 'low': 1
-        })
-        
-        score = (
-            self.results['critical_count'] * weights.get('critical', 25) +
-            self.results['high_count'] * weights.get('high', 10) +
-            self.results['medium_count'] * weights.get('medium', 3) +
-            self.results['low_count'] * weights.get('low', 1)
-        )
-        
-        return min(score, 100)
+        """
+        Calculate overall risk score (0-100).
+
+        Uses logarithmic scaling to provide meaningful differentiation:
+        - 4 critical vulns shouldn't look the same as 400
+        - Score approaches but never exceeds 100
+        - Critical issues have outsized impact
+        """
+        import math
+
+        critical = self.results['critical_count']
+        high = self.results['high_count']
+        medium = self.results['medium_count']
+        low = self.results['low_count']
+
+        # If any critical, minimum score is 50
+        # Each additional critical adds diminishing points (log scale)
+        if critical > 0:
+            critical_score = 50 + min(30, 10 * math.log2(critical + 1))
+        else:
+            critical_score = 0
+
+        # High issues: up to 40 points with log scaling
+        if high > 0:
+            high_score = min(40, 15 * math.log2(high + 1))
+        else:
+            high_score = 0
+
+        # Medium issues: up to 20 points
+        if medium > 0:
+            medium_score = min(20, 7 * math.log2(medium + 1))
+        else:
+            medium_score = 0
+
+        # Low issues: up to 10 points
+        if low > 0:
+            low_score = min(10, 3 * math.log2(low + 1))
+        else:
+            low_score = 0
+
+        # Combine scores, cap at 100
+        raw_score = critical_score + high_score + medium_score + low_score
+
+        # Store raw score for reports (shows true magnitude)
+        self.results['raw_risk_score'] = int(raw_score)
+
+        return min(int(raw_score), 100)
     
     def get_risk_level(self, score):
         """Get risk level description"""

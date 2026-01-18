@@ -100,16 +100,18 @@ SECRET_PATTERNS = {
         "case_sensitive": True  # Mailgun keys have exact prefix
     },
     "Database Connection String": {
-        "pattern": r"(mongodb|mysql|postgres|postgresql)://[^\s]{10,}",
+        "pattern": r"(mongodb|mysql|postgres|postgresql)://[^/\s:@]+:[^/\s:@]+@[^\s]+",
         "severity": "high",
-        "description": "Database connection string detected",
+        "description": "Database connection string with credentials detected",
         "case_sensitive": False  # URL schemes can vary
     },
-    "Firebase URL": {
-        "pattern": r"[a-zA-Z0-9-]+\.firebaseio\.com",
-        "severity": "medium",
-        "description": "Firebase URL detected",
-        "case_sensitive": False
+    # Note: Firebase URLs (*.firebaseio.com) are NOT secrets - they're public endpoints
+    # Only the Firebase Admin SDK private key is sensitive
+    "Firebase Private Key": {
+        "pattern": r"-----BEGIN PRIVATE KEY-----[^-]+-----END PRIVATE KEY-----",
+        "severity": "critical",
+        "description": "Firebase/GCP service account private key detected",
+        "case_sensitive": True
     },
     "OAuth Token": {
         "pattern": r"access[_-]?token['\"]?\s*[:=]\s*['\"]([0-9a-zA-Z\-._~+/]{20,})['\"]",
@@ -267,21 +269,6 @@ class CommentTracker:
         self.docstring_char = None
 
 
-# Global comment tracker instance - reset per file
-_comment_tracker = CommentTracker()
-
-
-def is_comment_line(line: str, file_ext: str) -> bool:
-    """
-    Check if a line is a comment based on file extension.
-    Uses stateful tracking for multi-line comments.
-
-    NOTE: For accurate multi-line detection, use CommentTracker directly
-    and call reset() at the start of each new file.
-    """
-    return _comment_tracker.is_comment_or_in_block(line, file_ext)
-
-
 def scan_file_for_secrets(file_path: Path, warnings: List[str] = None) -> List[Dict]:
     """
     Scan a single file for secrets.
@@ -293,16 +280,16 @@ def scan_file_for_secrets(file_path: Path, warnings: List[str] = None) -> List[D
     secrets_found = []
     file_ext = file_path.suffix.lower()
 
-    # Reset comment tracker state for this new file
-    _comment_tracker.reset()
+    # Create a new CommentTracker instance for this file (thread-safe)
+    comment_tracker = CommentTracker()
 
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
 
         for line_num, line in enumerate(lines, 1):
-            # Skip comment lines (uses stateful multi-line tracking)
-            if is_comment_line(line, file_ext):
+            # Skip comment lines (uses per-file tracker for thread safety)
+            if comment_tracker.is_comment_or_in_block(line, file_ext):
                 continue
 
             for secret_type, config in SECRET_PATTERNS.items():
