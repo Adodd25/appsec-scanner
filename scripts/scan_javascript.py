@@ -108,23 +108,24 @@ def scan_npm_dependencies(project_path):
 
 def scan_javascript_code(target_path):
     """
-    Scan JavaScript code for security issues using ESLint
+    Scan JavaScript/TypeScript code for security issues using ESLint
     Note: Requires ESLint and eslint-plugin-security to be installed
-    
+    For TypeScript: also requires @typescript-eslint/parser
+
     Args:
-        target_path: Path to JavaScript file or directory
-    
+        target_path: Path to JavaScript/TypeScript file or directory
+
     Returns:
         dict: ESLint scan results
     """
     target = Path(target_path)
-    
+
     if not target.exists():
         return {
             "success": False,
             "error": f"Target path does not exist: {target_path}"
         }
-    
+
     # Check if eslint is available
     try:
         result = subprocess.run(
@@ -142,8 +143,18 @@ def scan_javascript_code(target_path):
             "success": False,
             "error": "npx not found. Ensure Node.js/npm is installed"
         }
-    
-    # Create minimal ESLint config for security scanning
+
+    # Check if TypeScript files exist to determine if we need TS parser
+    has_typescript = False
+    if target.is_dir():
+        ts_files = list(target.rglob("*.ts")) + list(target.rglob("*.tsx"))
+        # Exclude node_modules
+        ts_files = [f for f in ts_files if "node_modules" not in str(f)]
+        has_typescript = len(ts_files) > 0
+    elif target.suffix in [".ts", ".tsx"]:
+        has_typescript = True
+
+    # Create ESLint config for security scanning
     eslint_config = {
         "plugins": ["security"],
         "extends": ["plugin:security/recommended"],
@@ -151,10 +162,23 @@ def scan_javascript_code(target_path):
             "node": True,
             "browser": True,
             "es2021": True
+        },
+        "parserOptions": {
+            "ecmaVersion": 2021,
+            "sourceType": "module",
+            "ecmaFeatures": {
+                "jsx": True
+            }
         }
     }
 
+    # Add TypeScript parser if TS files are present
+    if has_typescript:
+        eslint_config["parser"] = "@typescript-eslint/parser"
+        eslint_config["parserOptions"]["project"] = None  # Don't require tsconfig
+
     # Use a unique temporary file to avoid race conditions with concurrent scans
+    config_file_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode='w',
@@ -165,14 +189,24 @@ def scan_javascript_code(target_path):
             json.dump(eslint_config, config_file)
             config_file_path = config_file.name
 
+        # Build ESLint command with appropriate extensions
+        eslint_cmd = [
+            "npx", "eslint",
+            "-c", config_file_path,
+            "--format", "json",
+            "--ext", ".js,.jsx,.ts,.tsx",
+            "--ignore-pattern", "node_modules/",
+            "--ignore-pattern", "dist/",
+            "--ignore-pattern", "build/",
+            str(target)
+        ]
+
         # Run ESLint with security plugin
         result = subprocess.run(
-            ["npx", "eslint",
-             "-c", config_file_path,
-             "--format", "json",
-             str(target)],
+            eslint_cmd,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=300  # 5 minute timeout
         )
 
         # Check stderr for errors/warnings
@@ -185,7 +219,9 @@ def scan_javascript_code(target_path):
 
         for file_result in eslint_data:
             for message in file_result.get("messages", []):
-                if "security/" in message.get("ruleId", ""):
+                rule_id = message.get("ruleId", "") or ""
+                # Include all security rules
+                if "security/" in rule_id:
                     # ESLint severity: 0=off, 1=warn, 2=error
                     eslint_severity = message.get("severity", 1)
                     if eslint_severity == 2:
@@ -201,7 +237,7 @@ def scan_javascript_code(target_path):
                         "column": message.get("column", 0),
                         "severity": severity,
                         "message": message.get("message", ""),
-                        "ruleId": message.get("ruleId", "")
+                        "ruleId": rule_id
                     })
                     total_issues += 1
 
@@ -218,11 +254,16 @@ def scan_javascript_code(target_path):
 
         return response
 
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": "ESLint scan timed out after 5 minutes"
+        }
     except json.JSONDecodeError as e:
         return {
             "success": False,
             "error": f"Failed to parse ESLint output: {e}",
-            "raw_stderr": result.stderr if 'result' in dir() else None
+            "raw_stderr": result.stderr if 'result' in locals() else None
         }
     except Exception as e:
         return {
@@ -230,11 +271,12 @@ def scan_javascript_code(target_path):
             "error": f"ESLint scan failed: {str(e)}"
         }
     finally:
-        # Clean up config file
-        try:
-            Path(config_file_path).unlink()
-        except (NameError, OSError):
-            pass  # File may not exist or config_file_path not defined
+        # Clean up config file safely
+        if config_file_path:
+            try:
+                Path(config_file_path).unlink(missing_ok=True)
+            except OSError:
+                pass  # Best effort cleanup
 
 
 def format_npm_results(results):
@@ -307,26 +349,29 @@ def format_eslint_results(results):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python scan_javascript.py <scan_type> <path>")
-        print("  scan_type: 'npm' for dependency scan or 'code' for code scan")
-        print("  path: project directory (for npm) or file/directory (for code)")
-        sys.exit(1)
-    
-    scan_type = sys.argv[1]
-    target_path = sys.argv[2]
-    
-    if scan_type == "npm":
-        results = scan_npm_dependencies(target_path)
-        print(format_npm_results(results))
-    elif scan_type == "code":
-        results = scan_javascript_code(target_path)
-        print(format_eslint_results(results))
-    else:
-        print(f"Invalid scan type: {scan_type}")
-        print("Use 'npm' or 'code'")
-        sys.exit(1)
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description="JavaScript/Node.js Security Scanner")
+    parser.add_argument("scan_type", choices=["npm", "code"],
+                        help="'npm' for dependency scan or 'code' for code scan")
+    parser.add_argument("path", help="Project directory (for npm) or file/directory (for code)")
+    parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    args = parser.parse_args()
+
+    if args.scan_type == "npm":
+        results = scan_npm_dependencies(args.path)
+        if args.json:
+            print(json.dumps(results))
+        else:
+            print(format_npm_results(results))
+    else:  # code
+        results = scan_javascript_code(args.path)
+        if args.json:
+            print(json.dumps(results))
+        else:
+            print(format_eslint_results(results))
+
     # Exit with appropriate code
     if results.get("success") and results.get("total_issues", 0) > 0:
         sys.exit(1)  # Vulnerabilities found

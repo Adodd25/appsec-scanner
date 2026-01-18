@@ -4,9 +4,9 @@ Secret Scanner
 Detects hardcoded secrets, API keys, passwords, and tokens in code
 """
 
+import json
 import re
 import sys
-import json
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -141,41 +141,145 @@ def should_scan_file(file_path: Path) -> bool:
     for part in file_path.parts:
         if part in SKIP_PATTERNS:
             return False
-    
+
     # Check extension
     return file_path.suffix.lower() in SCANNABLE_EXTENSIONS
+
+
+def _redact_secret(secret: str, secret_type: str) -> str:
+    """
+    Redact a secret value, showing only enough to identify the type.
+    SECURITY: This prevents accidental exposure of credentials in reports.
+    """
+    if len(secret) <= 8:
+        return f"[{secret_type}: {len(secret)} chars]"
+
+    # Show prefix for identifiable tokens (e.g., "ghp_", "sk_live_", "AKIA")
+    prefixes = {
+        "GitHub Token": 4,
+        "AWS Access Key": 4,
+        "Stripe API Key": 8,
+        "Slack Token": 4,
+        "Google API Key": 4,
+        "SendGrid API Key": 3,
+        "Twilio API Key": 2,
+        "Mailgun API Key": 4,
+    }
+
+    prefix_len = prefixes.get(secret_type, 0)
+    if prefix_len > 0 and len(secret) > prefix_len + 4:
+        return f"{secret[:prefix_len]}{'*' * 8}... ({len(secret)} chars)"
+
+    # For other secrets, just show length
+    return f"[{secret_type}: {len(secret)} chars]"
+
+
+def _redact_line(line: str, secret: str) -> str:
+    """
+    Redact the secret within a line of code.
+    SECURITY: Prevents full secret exposure in line context.
+    """
+    if not secret or secret not in line:
+        return line
+
+    # Replace the secret with a redacted placeholder
+    redacted = "[REDACTED]"
+    return line.replace(secret, redacted)
+
+
+class CommentTracker:
+    """
+    Tracks multi-line comment state across lines for accurate detection.
+    Handles C-style /* */ comments and Python docstrings.
+    """
+
+    def __init__(self):
+        self.in_block_comment = False
+        self.in_docstring = False
+        self.docstring_char = None  # """ or '''
+
+    def is_comment_or_in_block(self, line: str, file_ext: str) -> bool:
+        """
+        Check if a line is a comment or inside a multi-line comment block.
+        Updates internal state for multi-line tracking.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return False
+
+        # Handle Python/JS docstrings (""" or ''')
+        if file_ext in ['.py', '.js', '.ts']:
+            triple_double = '"""'
+            triple_single = "'''"
+
+            if self.in_docstring:
+                # Check if docstring ends on this line
+                if self.docstring_char in stripped:
+                    # Count occurrences - odd means it closes
+                    count = stripped.count(self.docstring_char)
+                    if count % 2 == 1:
+                        self.in_docstring = False
+                        self.docstring_char = None
+                return True
+
+            # Check if docstring starts
+            if triple_double in stripped or triple_single in stripped:
+                char = triple_double if triple_double in stripped else triple_single
+                count = stripped.count(char)
+                if count == 1:
+                    # Opens but doesn't close on same line
+                    self.in_docstring = True
+                    self.docstring_char = char
+                    return True
+                elif count >= 2:
+                    # Opens and closes on same line (or multiple)
+                    return True
+
+        # Handle C-style block comments /* */
+        if self.in_block_comment:
+            if '*/' in stripped:
+                self.in_block_comment = False
+            return True
+
+        if '/*' in stripped:
+            if '*/' not in stripped or stripped.index('/*') > stripped.index('*/'):
+                self.in_block_comment = True
+            return True
+
+        # Single-line comment prefixes
+        if stripped.startswith('#'):  # Python, Ruby, Shell, YAML
+            return True
+        if stripped.startswith('//'):  # JavaScript, TypeScript, Java, C, Go
+            return True
+        if stripped.startswith('--'):  # SQL, Lua
+            return True
+        if stripped.startswith(';'):  # INI, Assembly
+            return True
+        if stripped.upper().startswith('REM '):  # Batch
+            return True
+
+        return False
+
+    def reset(self):
+        """Reset state for a new file"""
+        self.in_block_comment = False
+        self.in_docstring = False
+        self.docstring_char = None
+
+
+# Global comment tracker instance - reset per file
+_comment_tracker = CommentTracker()
 
 
 def is_comment_line(line: str, file_ext: str) -> bool:
     """
     Check if a line is a comment based on file extension.
-    Returns True for full-line comments only (not inline comments).
+    Uses stateful tracking for multi-line comments.
+
+    NOTE: For accurate multi-line detection, use CommentTracker directly
+    and call reset() at the start of each new file.
     """
-    stripped = line.strip()
-    if not stripped:
-        return False
-
-    # Common comment prefixes by language
-    if stripped.startswith('#'):  # Python, Ruby, Shell, YAML
-        return True
-    if stripped.startswith('//'):  # JavaScript, TypeScript, Java, C, Go
-        return True
-    if stripped.startswith('--'):  # SQL, Lua
-        return True
-    if stripped.startswith(';'):  # INI, Assembly
-        return True
-    if stripped.startswith('/*'):  # Multi-line comment start (C-style)
-        return True
-    if stripped.startswith('*'):  # Likely inside multi-line comment
-        return True
-    if stripped.startswith('REM ') or stripped.upper().startswith('REM '):  # Batch
-        return True
-
-    # Python/JS docstrings - basic detection
-    if stripped.startswith('"""') or stripped.startswith("'''"):
-        return True
-
-    return False
+    return _comment_tracker.is_comment_or_in_block(line, file_ext)
 
 
 def scan_file_for_secrets(file_path: Path, warnings: List[str] = None) -> List[Dict]:
@@ -189,12 +293,15 @@ def scan_file_for_secrets(file_path: Path, warnings: List[str] = None) -> List[D
     secrets_found = []
     file_ext = file_path.suffix.lower()
 
+    # Reset comment tracker state for this new file
+    _comment_tracker.reset()
+
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
 
         for line_num, line in enumerate(lines, 1):
-            # Skip comment lines
+            # Skip comment lines (uses stateful multi-line tracking)
             if is_comment_line(line, file_ext):
                 continue
 
@@ -205,12 +312,10 @@ def scan_file_for_secrets(file_path: Path, warnings: List[str] = None) -> List[D
                 matches = re.finditer(pattern, line, flags)
 
                 for match in matches:
-                    # Extract matched secret (truncate for safety)
+                    # SECURITY: Don't expose actual secret values in output
+                    # Only show the pattern type and location
                     matched_text = match.group(0)
-                    if len(matched_text) > 50:
-                        display_text = matched_text[:50] + "..."
-                    else:
-                        display_text = matched_text
+                    redacted_preview = _redact_secret(matched_text, secret_type)
 
                     secrets_found.append({
                         'type': secret_type,
@@ -218,8 +323,8 @@ def scan_file_for_secrets(file_path: Path, warnings: List[str] = None) -> List[D
                         'line': line_num,
                         'severity': config['severity'],
                         'description': config['description'],
-                        'matched': display_text,
-                        'line_content': line.strip()[:100]
+                        'matched': redacted_preview,
+                        'line_content': _redact_line(line.strip()[:100], matched_text)
                     })
 
     except PermissionError:
@@ -345,21 +450,36 @@ def format_results(results: Dict) -> str:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python scan_secrets.py <path_to_scan>")
-        print("\nScans code for hardcoded secrets, API keys, passwords, and tokens")
-        sys.exit(1)
-    
-    target_path = Path(sys.argv[1])
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Scan code for hardcoded secrets, API keys, passwords, and tokens"
+    )
+    parser.add_argument("path", help="Path to file or directory to scan")
+    parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    args = parser.parse_args()
+
+    target_path = Path(args.path)
+
     if not target_path.exists():
-        print(f"Error: Path does not exist: {target_path}")
+        error_result = {"success": False, "error": f"Path does not exist: {target_path}"}
+        if args.json:
+            print(json.dumps(error_result))
+        else:
+            print(f"Error: Path does not exist: {target_path}")
         sys.exit(2)
-    
-    print(f"🔍 Scanning for secrets in: {target_path}")
+
+    if not args.json:
+        print(f"🔍 Scanning for secrets in: {target_path}")
+
     results = scan_directory_for_secrets(target_path)
-    print(format_results(results))
-    
+
+    if args.json:
+        print(json.dumps(results))
+    else:
+        print(format_results(results))
+
     # Exit with appropriate code
     if results['total_secrets'] > 0:
         sys.exit(1)  # Secrets found

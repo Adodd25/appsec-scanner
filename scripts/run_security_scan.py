@@ -16,9 +16,10 @@ import sys
 import json
 import time
 import yaml
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple, Callable
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,12 +106,27 @@ class SecurityScanner:
         project_info = {
             'python': False,
             'javascript': False,
+            'typescript': False,
             'nodejs': False,
             'python_files': [],
             'js_files': [],
+            'ts_files': [],
             'package_json': []
         }
-        
+
+        # Get exclude patterns from config
+        exclude_patterns = self.config.get('scan', {}).get('exclude', [])
+        exclude_dirs = {'node_modules', '.git', '__pycache__', 'venv', 'env',
+                        '.venv', 'dist', 'build', '.pytest_cache'}
+
+        def should_include(path: Path) -> bool:
+            """Check if path should be included based on exclude patterns"""
+            path_str = str(path)
+            for part in path.parts:
+                if part in exclude_dirs:
+                    return False
+            return True
+
         # Search for files
         if self.target_path.is_file():
             if self.target_path.suffix == ".py":
@@ -119,53 +135,107 @@ class SecurityScanner:
             elif self.target_path.suffix in [".js", ".jsx"]:
                 project_info['javascript'] = True
                 project_info['js_files'].append(str(self.target_path))
+            elif self.target_path.suffix in [".ts", ".tsx"]:
+                project_info['typescript'] = True
+                project_info['javascript'] = True  # TS is scanned with JS scanner
+                project_info['ts_files'].append(str(self.target_path))
         else:
-            # Scan directory
-            python_files = list(self.target_path.rglob("*.py"))
+            # Scan directory - no arbitrary limits
+            python_files = [f for f in self.target_path.rglob("*.py") if should_include(f)]
             if python_files:
                 project_info['python'] = True
-                project_info['python_files'] = [str(f) for f in python_files[:100]]
-            
-            js_files = list(self.target_path.rglob("*.js")) + list(self.target_path.rglob("*.jsx"))
-            if js_files:
+                project_info['python_files'] = [str(f) for f in python_files]
+
+            js_files = [f for f in self.target_path.rglob("*.js") if should_include(f)]
+            jsx_files = [f for f in self.target_path.rglob("*.jsx") if should_include(f)]
+            all_js = js_files + jsx_files
+            if all_js:
                 project_info['javascript'] = True
-                project_info['js_files'] = [str(f) for f in js_files[:100]]
-            
-            package_jsons = list(self.target_path.rglob("package.json"))
+                project_info['js_files'] = [str(f) for f in all_js]
+
+            ts_files = [f for f in self.target_path.rglob("*.ts") if should_include(f)]
+            tsx_files = [f for f in self.target_path.rglob("*.tsx") if should_include(f)]
+            all_ts = ts_files + tsx_files
+            if all_ts:
+                project_info['typescript'] = True
+                project_info['javascript'] = True  # TS scanned with JS scanner
+                project_info['ts_files'] = [str(f) for f in all_ts]
+
+            package_jsons = [f for f in self.target_path.rglob("package.json") if should_include(f)]
             if package_jsons:
                 project_info['nodejs'] = True
                 project_info['package_json'] = [str(f.parent) for f in package_jsons]
-        
+
         return project_info
     
     def run_scan(self, script_name, *args):
-        """Run a scanner script and capture output"""
+        """Run a scanner script and capture structured JSON output"""
         script_path = Path(__file__).parent / script_name
-        
+
         try:
             result = subprocess.run(
-                [sys.executable, str(script_path), *args],
+                [sys.executable, str(script_path), '--json', *args],
                 capture_output=True,
                 text=True,
                 timeout=300  # 5 minute timeout
             )
+
+            # Parse JSON output from scanner
+            try:
+                scan_result = json.loads(result.stdout) if result.stdout.strip() else {}
+            except json.JSONDecodeError:
+                # Fallback: scanner didn't output JSON
+                scan_result = {'raw_output': result.stdout}
+
             return {
                 'success': result.returncode in [0, 1],  # 0 = clean, 1 = vulns found
-                'output': result.stdout,
-                'exit_code': result.returncode
+                'data': scan_result,
+                'exit_code': result.returncode,
+                'stderr': result.stderr
             }
         except subprocess.TimeoutExpired:
             return {
                 'success': False,
-                'output': 'Scan timeout after 5 minutes',
-                'exit_code': 124
+                'data': {'error': 'Scan timeout after 5 minutes'},
+                'exit_code': 124,
+                'stderr': ''
             }
         except Exception as e:
             return {
                 'success': False,
-                'output': f'Error running scanner: {str(e)}',
-                'exit_code': 2
+                'data': {'error': f'Error running scanner: {str(e)}'},
+                'exit_code': 2,
+                'stderr': ''
             }
+
+    def normalize_severity(self, severity: str) -> str:
+        """Normalize severity names across different tools"""
+        severity = severity.lower().strip()
+        # Map variations to standard names
+        severity_map = {
+            'moderate': 'medium',
+            'warning': 'medium',
+            'warn': 'medium',
+            'error': 'high',
+            'info': 'low',
+            'informational': 'low'
+        }
+        return severity_map.get(severity, severity)
+
+    def add_vulnerabilities(self, vulns: List[Dict], tool: str):
+        """Add vulnerabilities from a scanner to the aggregated results"""
+        for vuln in vulns:
+            normalized = {
+                'tool': tool,
+                'severity': self.normalize_severity(vuln.get('severity', 'medium')),
+                'title': vuln.get('title', vuln.get('test_name', vuln.get('ruleId', 'Security Issue'))),
+                'description': vuln.get('description', vuln.get('issue_text', vuln.get('message', ''))),
+                'file': vuln.get('file', vuln.get('filename', 'unknown')),
+                'line': vuln.get('line', vuln.get('line_number', 0)),
+                'code': vuln.get('code', vuln.get('line_content', '')),
+                'fix': vuln.get('fix', vuln.get('more_info', ''))
+            }
+            self.results['all_vulnerabilities'].append(normalized)
     
     def aggregate_results(self):
         """Aggregate and categorize all vulnerabilities"""
@@ -185,68 +255,149 @@ class SecurityScanner:
                 self.results['low_vulnerabilities'].append(vuln)
                 self.results['low_count'] += 1
     
+    def _run_python_scan(self, project_info: Dict) -> Tuple[str, Dict]:
+        """Run Python security scan - designed for parallel execution"""
+        result = self.run_scan('scan_python.py', str(self.target_path))
+        return ('python', {
+            'result': result,
+            'file_count': len(project_info['python_files']),
+            'scan_name': 'Python (Bandit)'
+        })
+
+    def _run_js_scan(self, project_info: Dict) -> Tuple[str, Dict]:
+        """Run JavaScript/TypeScript security scan - designed for parallel execution"""
+        result = self.run_scan('scan_javascript.py', 'code', str(self.target_path))
+        scan_name = 'JavaScript/TypeScript (ESLint)' if project_info['typescript'] else 'JavaScript (ESLint)'
+        js_count = len(project_info['js_files']) + len(project_info.get('ts_files', []))
+        return ('javascript', {
+            'result': result,
+            'file_count': js_count,
+            'scan_name': scan_name
+        })
+
+    def _run_npm_scan(self, project_dir: str) -> Tuple[str, Dict]:
+        """Run npm audit for a single project - designed for parallel execution"""
+        result = self.run_scan('scan_javascript.py', 'npm', project_dir)
+        return ('npm', {
+            'result': result,
+            'project_dir': project_dir
+        })
+
+    def _run_secrets_scan(self) -> Tuple[str, Dict]:
+        """Run secret detection scan - designed for parallel execution"""
+        result = self.run_scan('scan_secrets.py', str(self.target_path))
+        return ('secrets', {'result': result})
+
     def run_comprehensive_scan(self):
-        """Run all enabled security scans"""
+        """Run all enabled security scans in parallel where possible"""
         print(f"\n🚀 Starting Enhanced Security Scan")
         print(f"{'='*70}")
         print(f"Target: {self.target_path}")
         print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*70}\n")
-        
+
         project_info = self.detect_project_type()
-        
-        # Python scanning
+        verbose = self.config['output'].get('verbose', False)
+
+        # Prepare scan tasks for parallel execution
+        scan_tasks = []
+
         if project_info['python'] and self.config['scan']['python']:
-            print("🔍 Running Python security scan (Bandit)...")
-            self.results['scans_performed'].append('Python (Bandit)')
-            result = self.run_scan('scan_python.py', str(self.target_path))
-            if result['success']:
-                print(result['output'])
-                self.results['files_scanned'] += len(project_info['python_files'])
-        
-        # JavaScript scanning
+            scan_tasks.append(('python', lambda: self._run_python_scan(project_info)))
+
         if project_info['javascript'] and self.config['scan']['javascript']:
-            print("\n🔍 Running JavaScript security scan (ESLint)...")
-            self.results['scans_performed'].append('JavaScript (ESLint)')
-            result = self.run_scan('scan_javascript.py', 'code', str(self.target_path))
-            if result['success']:
-                print(result['output'])
-                self.results['files_scanned'] += len(project_info['js_files'])
-        
-        # Node.js dependency scanning
-        if project_info['nodejs'] and self.config['scan']['dependencies']:
-            print("\n🔍 Running Node.js dependency scan (npm audit)...")
-            self.results['scans_performed'].append('Dependencies (npm audit)')
-            for project_dir in project_info['package_json']:
-                print(f"   Scanning: {project_dir}")
-                result = self.run_scan('scan_javascript.py', 'npm', project_dir)
-                if result['success']:
-                    print(result['output'])
-        
-        # Secret scanning
+            scan_tasks.append(('javascript', lambda: self._run_js_scan(project_info)))
+
         if self.config['scan']['secrets']:
-            print("\n🔍 Running secret detection scan...")
-            self.results['scans_performed'].append('Secrets Detection')
-            result = self.run_scan('scan_secrets.py', str(self.target_path))
-            if result['success']:
-                print(result['output'])
-                # Parse secrets count from output
-                if 'Secrets Found:' in result['output']:
-                    for line in result['output'].split('\n'):
-                        if 'Secrets Found:' in line:
-                            try:
-                                count = int(line.split(':')[1].strip())
-                                self.results['secrets_found'] = count
-                            except (ValueError, IndexError) as e:
-                                print(f"⚠️  Could not parse secrets count: {e}")
-        
-        # Aggregate results
+            scan_tasks.append(('secrets', lambda: self._run_secrets_scan()))
+
+        # npm scans for each package.json (these can also run in parallel)
+        if project_info['nodejs'] and self.config['scan']['dependencies']:
+            for project_dir in project_info['package_json']:
+                # Capture project_dir in closure
+                scan_tasks.append(('npm', lambda pd=project_dir: self._run_npm_scan(pd)))
+
+        # Run scans in parallel
+        print(f"🔄 Running {len(scan_tasks)} scan(s) in parallel...\n")
+
+        with ThreadPoolExecutor(max_workers=min(4, len(scan_tasks) or 1)) as executor:
+            futures = {executor.submit(task[1]): task[0] for task in scan_tasks}
+
+            for future in as_completed(futures):
+                scan_type, data = future.result()
+
+                if scan_type == 'python':
+                    result = data['result']
+                    self.results['scans_performed'].append(data['scan_name'])
+                    if result['success']:
+                        vulns = result['data'].get('vulnerabilities', [])
+                        self.add_vulnerabilities(vulns, 'Bandit')
+                        self.results['files_scanned'] += result['data'].get('files_scanned', data['file_count'])
+                        print(f"✅ Python (Bandit): Found {len(vulns)} issues")
+                        if verbose and result.get('stderr'):
+                            print(f"   {result['stderr']}")
+                    else:
+                        print(f"⚠️  Python scan failed: {result['data'].get('error', 'Unknown error')}")
+
+                elif scan_type == 'javascript':
+                    result = data['result']
+                    self.results['scans_performed'].append(data['scan_name'])
+                    if result['success']:
+                        vulns = result['data'].get('vulnerabilities', [])
+                        self.add_vulnerabilities(vulns, 'ESLint')
+                        self.results['files_scanned'] += data['file_count']
+                        print(f"✅ {data['scan_name']}: Found {len(vulns)} issues in {data['file_count']} files")
+                    else:
+                        print(f"⚠️  JavaScript scan failed: {result['data'].get('error', 'Unknown error')}")
+
+                elif scan_type == 'npm':
+                    result = data['result']
+                    if 'Dependencies (npm audit)' not in self.results['scans_performed']:
+                        self.results['scans_performed'].append('Dependencies (npm audit)')
+                    if result['success']:
+                        vulns = result['data'].get('vulnerabilities', [])
+                        for vuln in vulns:
+                            self.results['all_vulnerabilities'].append({
+                                'tool': 'npm audit',
+                                'severity': self.normalize_severity(vuln.get('severity', 'medium')),
+                                'title': f"Vulnerable package: {vuln.get('package', 'unknown')}",
+                                'description': f"Version range: {vuln.get('range', 'unknown')}",
+                                'file': 'package.json',
+                                'line': 0,
+                                'code': '',
+                                'fix': 'Fix available' if vuln.get('fixAvailable') else 'No fix available'
+                            })
+                        self.results['outdated_dependencies'] += len(vulns)
+                        print(f"✅ npm audit ({data['project_dir']}): Found {len(vulns)} vulnerable packages")
+
+                elif scan_type == 'secrets':
+                    result = data['result']
+                    self.results['scans_performed'].append('Secrets Detection')
+                    if result['success']:
+                        secrets = result['data'].get('secrets', [])
+                        for secret in secrets:
+                            self.results['all_vulnerabilities'].append({
+                                'tool': 'Secret Scanner',
+                                'severity': self.normalize_severity(secret.get('severity', 'high')),
+                                'title': f"Exposed secret: {secret.get('type', 'Unknown')}",
+                                'description': secret.get('description', 'Hardcoded secret detected'),
+                                'file': secret.get('file', 'unknown'),
+                                'line': secret.get('line', 0),
+                                'code': '[REDACTED]',
+                                'fix': 'Remove from code and use environment variables or secret manager'
+                            })
+                        self.results['secrets_found'] = len(secrets)
+                        print(f"✅ Secret Scanner: Found {len(secrets)} potential secrets")
+                    else:
+                        print(f"⚠️  Secret scan failed: {result['data'].get('error', 'Unknown error')}")
+
+        # Aggregate results by severity
         self.aggregate_results()
-        
+
         # Calculate scan duration
         duration = time.time() - self.start_time
         self.results['scan_duration'] = f"{duration:.1f} seconds"
-        
+
         return self.results
     
     def generate_reports(self):

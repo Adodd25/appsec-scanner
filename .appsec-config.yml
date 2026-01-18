@@ -1,156 +1,69 @@
 # Application Security Scanner Configuration
 # Copy this file to .appsec-config.yml in your project root
-#
-# NOTE: Options marked [IMPLEMENTED] are currently functional.
-# Options marked [PLANNED] are defined for future implementation.
 
 # =============================================================================
-# SCAN OPTIONS [IMPLEMENTED]
+# SCAN OPTIONS
 # =============================================================================
 scan:
   # Enable/disable specific scanners
-  python: true        # [IMPLEMENTED] Run Bandit Python scanner
-  javascript: true    # [IMPLEMENTED] Run ESLint security scan
-  secrets: true       # [IMPLEMENTED] Run secret detection
-  dependencies: true  # [IMPLEMENTED] Run npm audit for dependencies
+  python: true        # Run Bandit Python scanner
+  javascript: true    # Run ESLint security scan (includes TypeScript)
+  secrets: true       # Run secret detection
+  dependencies: true  # Run npm audit for dependencies
 
-  # [PLANNED] File patterns to include/exclude
-  # These are not yet implemented - scanners use their own defaults
-  include:
-    - "**/*.py"
-    - "**/*.js"
-    - "**/*.jsx"
-    - "**/*.ts"
-    - "**/*.tsx"
-
+  # Directories to exclude from scanning
+  # These are applied to file discovery, not passed to individual tools
   exclude:
     - "**/node_modules/**"
     - "**/__pycache__/**"
     - "**/venv/**"
     - "**/env/**"
+    - "**/.venv/**"
     - "**/.git/**"
     - "**/dist/**"
     - "**/build/**"
-    - "**/test/**"
-    - "**/tests/**"
-    - "**/*.test.js"
-    - "**/*.spec.js"
 
 # =============================================================================
-# SEVERITY THRESHOLDS [PARTIALLY IMPLEMENTED]
+# SEVERITY THRESHOLDS
 # =============================================================================
 severity:
-  # [PLANNED] Filter to only show issues at or above this severity
-  minimum: "low"  # Options: critical, high, medium, low
-
-  # [IMPLEMENTED] Exit with error code if issues at this level found
-  fail_on: "high"  # Options: critical, high, medium, low
+  # Exit with error code if issues at this level or above are found
+  # Options: critical, high, medium, low
+  fail_on: "high"
 
 # =============================================================================
-# OUTPUT OPTIONS [IMPLEMENTED]
+# OUTPUT OPTIONS
 # =============================================================================
 output:
-  # [IMPLEMENTED] Output formats to generate (can also use --format CLI flag)
+  # Output formats to generate
+  # Available: text, json, html, sarif
   formats:
-    - "text"      # Console output
-    - "json"      # JSON file
-    - "html"      # HTML report
-    - "sarif"     # SARIF for GitHub
+    - "text"
+    - "json"
+    - "html"
+    - "sarif"
 
-  # [IMPLEMENTED] Output file paths
+  # Output file paths
   json_file: "security-results.json"
   html_file: "security-report.html"
   sarif_file: "security-results.sarif"
 
-  # [PLANNED] Verbosity level
+  # Enable verbose output for debugging
   verbose: false
 
 # =============================================================================
-# TOOL-SPECIFIC CONFIGURATION [PLANNED]
-# =============================================================================
-# These options are defined but not yet passed to the underlying tools
-tools:
-  bandit:
-    # [PLANNED] Bandit confidence levels to include
-    confidence: "medium"  # Options: low, medium, high
-
-  eslint:
-    # [PLANNED] ESLint security rules severity
-    rules_severity: "warn"  # Options: error, warn, off
-
-  secrets:
-    # [PLANNED] Enable specific secret patterns
-    patterns:
-      - "aws"
-      - "github"
-      - "api_key"
-      - "private_key"
-      - "password"
-
-    # [PLANNED] Allowlist for false positives (regex patterns)
-    allowlist:
-      - "example\\.com"
-      - "dummy[_-]?key"
-      - "test[_-]?password"
-
-# =============================================================================
-# REPORTING OPTIONS [PLANNED]
-# =============================================================================
-reporting:
-  # [PLANNED] Include code snippets in reports
-  include_code: true
-
-  # [PLANNED] Maximum snippet length
-  max_snippet_length: 100
-
-  # [PLANNED] Group findings by file or severity
-  group_by: "severity"  # Options: severity, file, type
-
-  # [PLANNED] Include fix suggestions
-  include_fixes: true
-
-# =============================================================================
-# INTEGRATION OPTIONS [PLANNED]
-# =============================================================================
-# These integrations are not yet implemented
-integration:
-  github:
-    enabled: false
-    create_issues: false
-    label: "security"
-
-  jira:
-    enabled: false
-    project_key: ""
-
-  slack:
-    enabled: false
-    webhook_url: ""
-
-# =============================================================================
-# RISK SCORING [IMPLEMENTED]
+# RISK SCORING
 # =============================================================================
 risk_scoring:
-  # [IMPLEMENTED] Weight for each severity level (used to calculate risk score)
+  # Weight for each severity level (used to calculate risk score 0-100)
   weights:
     critical: 25
     high: 10
     medium: 3
     low: 1
 
-  # [IMPLEMENTED] Risk thresholds for categorization
+  # Risk thresholds for categorization
   thresholds:
     critical: 75  # Score >= 75 is critical risk
     high: 50      # Score >= 50 is high risk
     medium: 25    # Score >= 25 is medium risk
-
-# =============================================================================
-# FALSE POSITIVE MANAGEMENT [PLANNED]
-# =============================================================================
-false_positives:
-  # [PLANNED] Suppress specific findings (by file and line)
-  suppress:
-    # Example:
-    # - file: "src/legacy/old_auth.py"
-    #   line: 42
-    #   reason: "Legacy code, scheduled for removal in Q2"
