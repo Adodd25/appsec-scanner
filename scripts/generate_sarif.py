@@ -160,19 +160,15 @@ def create_tool_run(tool_name, tool_version, vulnerabilities, target_path):
         }
         
         # Add code snippet if available
-        if vuln.get('code'):
+        if vuln.get('code') and vuln.get('code') != '[REDACTED]':
             result['locations'][0]['physicalLocation']['region']['snippet'] = {
                 "text": vuln.get('code', '')
             }
-        
-        # Add fix suggestion if available
-        if vuln.get('fix'):
-            result['fixes'] = [{
-                "description": {
-                    "text": vuln.get('fix', '')
-                }
-            }]
-        
+
+        # Note: SARIF 'fixes' require 'artifactChanges' with actual code replacements.
+        # Since we only have text descriptions, we include fix suggestions in the
+        # rule's help text instead (see rule definition above).
+
         run['results'].append(result)
     
     return run

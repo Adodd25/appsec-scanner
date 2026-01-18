@@ -159,14 +159,22 @@ def format_results(results):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python scan_python.py <path_to_scan>")
-        sys.exit(1)
-    
-    target_path = sys.argv[1]
-    results = scan_python_code(target_path)
-    print(format_results(results))
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Python Security Scanner using Bandit")
+    parser.add_argument("path", help="Path to Python file or directory to scan")
+    parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    args = parser.parse_args()
+
+    results = scan_python_code(args.path)
+
+    if args.json:
+        # Output structured JSON for orchestrator
+        print(json.dumps(results))
+    else:
+        print(format_results(results))
+
     # Exit with appropriate code
     if results.get("success") and results.get("total_issues", 0) > 0:
         sys.exit(1)  # Vulnerabilities found

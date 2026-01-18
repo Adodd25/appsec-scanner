@@ -13,6 +13,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  security-events: write  # For SARIF upload
 
 jobs:
   security-scan:
@@ -31,100 +32,118 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-      
+
       - name: Install Python security tools
         run: |
-          pip install bandit safety pip-audit
-      
+          pip install bandit pyyaml
+
       - name: Install JavaScript security tools
         run: |
-          npm install -g eslint eslint-plugin-security
-      
+          npm install -g eslint eslint-plugin-security @typescript-eslint/parser
+
       - name: Install project dependencies
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f package.json ]; then npm install; fi
-      
-      - name: Run Python security scan (Bandit)
+
+      - name: Run security scan (orchestrator)
+        id: security_scan
         continue-on-error: true
         run: |
-          if ls *.py 2>/dev/null || find . -name "*.py" -type f -print -quit | grep -q .; then
-            bandit -r . -f json -o bandit-report.json || true
-            bandit -r . || true
-          else
-            echo "No Python files found, skipping Python scan"
-          fi
-      
-      - name: Run Python dependency check (Safety)
-        continue-on-error: true
-        run: |
-          if [ -f requirements.txt ]; then
-            safety check --json > safety-report.json || true
-            safety check || true
-          else
-            echo "No requirements.txt found, skipping Safety check"
-          fi
-      
-      - name: Run npm audit
-        continue-on-error: true
-        run: |
-          if [ -f package.json ]; then
-            npm audit --json > npm-audit-report.json || true
-            npm audit || true
-          else
-            echo "No package.json found, skipping npm audit"
-          fi
-      
-      - name: Run JavaScript security scan (ESLint)
-        continue-on-error: true
-        run: |
-          if ls *.js 2>/dev/null || find . -name "*.js" -type f -print -quit | grep -q .; then
-            npx eslint . --ext .js,.jsx --format json > eslint-report.json || true
-            npx eslint . --ext .js,.jsx || true
-          else
-            echo "No JavaScript files found, skipping ESLint scan"
-          fi
-      
+          python scripts/run_security_scan.py . --format json,html,sarif
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Upload SARIF to GitHub Security
+        if: always() && hashFiles('security-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: security-results.sarif
+
       - name: Upload scan results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: security-scan-results
           path: |
-            bandit-report.json
-            safety-report.json
-            npm-audit-report.json
-            eslint-report.json
+            security-results.json
+            security-report.html
+            security-results.sarif
           retention-days: 30
-      
-      - name: Create summary comment
-        if: github.event_name == 'pull_request'
+
+      - name: Create PR comment with results
+        if: github.event_name == 'pull_request' && always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             let comment = '## 🛡️ Security Scan Results\n\n';
-            
-            // Read and summarize results
+
             try {
-              if (fs.existsSync('bandit-report.json')) {
-                const bandit = JSON.parse(fs.readFileSync('bandit-report.json', 'utf8'));
-                const results = bandit.results || [];
-                comment += `### Python (Bandit)\n- Issues found: ${results.length}\n\n`;
+              if (fs.existsSync('security-results.json')) {
+                const results = JSON.parse(fs.readFileSync('security-results.json', 'utf8'));
+
+                // Summary counts
+                const critical = results.critical_count || 0;
+                const high = results.high_count || 0;
+                const medium = results.medium_count || 0;
+                const low = results.low_count || 0;
+                const total = critical + high + medium + low;
+                const secrets = results.secrets_found || 0;
+
+                // Status indicator
+                if (critical > 0 || high > 0) {
+                  comment += '### ❌ Security Issues Found\n\n';
+                } else if (medium > 0 || low > 0) {
+                  comment += '### ⚠️ Minor Issues Found\n\n';
+                } else {
+                  comment += '### ✅ No Security Issues Found\n\n';
+                }
+
+                // Summary table
+                comment += '| Severity | Count |\n';
+                comment += '|----------|-------|\n';
+                comment += `| 🔴 Critical | ${critical} |\n`;
+                comment += `| 🟠 High | ${high} |\n`;
+                comment += `| 🟡 Medium | ${medium} |\n`;
+                comment += `| 🟢 Low | ${low} |\n`;
+                comment += `| **Total** | **${total}** |\n\n`;
+
+                if (secrets > 0) {
+                  comment += `⚠️ **${secrets} potential secrets detected!** Please review immediately.\n\n`;
+                }
+
+                // Scans performed
+                const scans = results.scans_performed || [];
+                if (scans.length > 0) {
+                  comment += `**Scans:** ${scans.join(', ')}\n`;
+                }
+                comment += `**Duration:** ${results.scan_duration || 'N/A'}\n`;
+                comment += `**Files scanned:** ${results.files_scanned || 0}\n\n`;
+
+                // Top issues (if any)
+                const allVulns = results.all_vulnerabilities || [];
+                const criticalAndHigh = allVulns.filter(v =>
+                  v.severity === 'critical' || v.severity === 'high'
+                ).slice(0, 5);
+
+                if (criticalAndHigh.length > 0) {
+                  comment += '### Top Issues\n\n';
+                  for (const vuln of criticalAndHigh) {
+                    const icon = vuln.severity === 'critical' ? '🔴' : '🟠';
+                    comment += `- ${icon} **${vuln.title}** in \`${vuln.file}\`\n`;
+                  }
+                  comment += '\n';
+                }
+
+              } else {
+                comment += '⚠️ No results file found. Check workflow logs.\n';
               }
-            } catch (e) {}
-            
-            try {
-              if (fs.existsSync('npm-audit-report.json')) {
-                const npm = JSON.parse(fs.readFileSync('npm-audit-report.json', 'utf8'));
-                const vulns = npm.metadata?.vulnerabilities || {};
-                const total = vulns.total || 0;
-                comment += `### npm Dependencies\n- Vulnerabilities: ${total}\n\n`;
-              }
-            } catch (e) {}
-            
-            comment += '📊 See artifacts for detailed reports.\n';
-            
+            } catch (e) {
+              comment += `⚠️ Error parsing results: ${e.message}\n`;
+            }
+
+            comment += '\n📊 See artifacts for detailed HTML report.\n';
+
             // Post comment
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -132,3 +151,9 @@ jobs:
               repo: context.repo.repo,
               body: comment
             });
+
+      - name: Fail if critical/high vulnerabilities found
+        if: steps.security_scan.outputs.exit_code == '1'
+        run: |
+          echo "❌ Security scan found critical or high severity vulnerabilities"
+          exit 1
