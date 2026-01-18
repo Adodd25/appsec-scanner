@@ -51,7 +51,6 @@ jobs:
         continue-on-error: true
         run: |
           python scripts/run_security_scan.py . --format json,html,sarif
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
 
       - name: Upload SARIF to GitHub Security
         if: always() && hashFiles('security-results.sarif') != ''
@@ -152,8 +151,18 @@ jobs:
               body: comment
             });
 
-      - name: Fail if critical/high vulnerabilities found
-        if: steps.security_scan.outputs.exit_code == '1'
+      - name: Check for critical/high vulnerabilities
+        if: always() && hashFiles('security-results.json') != ''
         run: |
-          echo "❌ Security scan found critical or high severity vulnerabilities"
-          exit 1
+          # Read vulnerability counts directly from results
+          CRITICAL=$(python3 -c "import json; r=json.load(open('security-results.json')); print(r.get('critical_count', 0))")
+          HIGH=$(python3 -c "import json; r=json.load(open('security-results.json')); print(r.get('high_count', 0))")
+
+          echo "Critical: $CRITICAL, High: $HIGH"
+
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "❌ Security scan found $CRITICAL critical and $HIGH high severity vulnerabilities"
+            exit 1
+          else
+            echo "✅ No critical or high severity vulnerabilities found"
+          fi
