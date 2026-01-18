@@ -40,6 +40,8 @@ def generate_sarif_report(scan_results, output_path='security-results.sarif'):
     python_vulns = [v for v in all_vulns if v.get('tool') == 'Bandit']
     js_vulns = [v for v in all_vulns if v.get('tool') in ['ESLint', 'ESLint Security', 'npm audit']]
     secret_vulns = [v for v in all_vulns if v.get('tool') == 'Secret Scanner']
+    semgrep_vulns = [v for v in all_vulns if v.get('tool') == 'Semgrep']
+    pip_audit_vulns = [v for v in all_vulns if v.get('tool') == 'pip-audit']
 
     # Also check for legacy key names for backwards compatibility
     if not python_vulns:
@@ -71,6 +73,22 @@ def generate_sarif_report(scan_results, output_path='security-results.sarif'):
             tool_name="Secret Scanner",
             tool_version="1.0.0",
             vulnerabilities=secret_vulns,
+            target_path=target_path
+        ))
+
+    if semgrep_vulns:
+        sarif['runs'].append(create_tool_run(
+            tool_name="Semgrep",
+            tool_version="1.0.0",
+            vulnerabilities=semgrep_vulns,
+            target_path=target_path
+        ))
+
+    if pip_audit_vulns:
+        sarif['runs'].append(create_tool_run(
+            tool_name="pip-audit",
+            tool_version="1.0.0",
+            vulnerabilities=pip_audit_vulns,
             target_path=target_path
         ))
 
@@ -139,6 +157,14 @@ def create_tool_run(tool_name, tool_version, vulnerabilities, target_path):
             file_uri = 'unknown'
 
         # Add result
+        # SARIF requires startLine and startColumn to be >= 1
+        start_line = vuln.get('line', 1) or 1
+        start_column = vuln.get('column', 1) or 1
+        if start_line < 1:
+            start_line = 1
+        if start_column < 1:
+            start_column = 1
+
         result = {
             "ruleId": rule_id,
             "level": map_severity_to_level(vuln.get('severity', 'warning')),
@@ -152,8 +178,8 @@ def create_tool_run(tool_name, tool_version, vulnerabilities, target_path):
                         "uriBaseId": "%SRCROOT%"
                     },
                     "region": {
-                        "startLine": vuln.get('line', 1),
-                        "startColumn": vuln.get('column', 1)
+                        "startLine": start_line,
+                        "startColumn": start_column
                     }
                 }
             }]

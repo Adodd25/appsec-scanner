@@ -9,7 +9,8 @@ scan:
   python: true        # Run Bandit Python scanner
   javascript: true    # Run ESLint security scan (includes TypeScript)
   secrets: true       # Run secret detection
-  dependencies: true  # Run npm audit for dependencies
+  dependencies: true  # Run npm audit and pip-audit for dependencies
+  semgrep: true       # Run Semgrep SAST (data flow analysis, taint tracking)
 
   # Directories to exclude from scanning
   # These are applied to file discovery, not passed to individual tools
