@@ -67,7 +67,8 @@ class SecurityScanner:
                 'python': True,
                 'javascript': True,
                 'secrets': True,
-                'dependencies': True
+                'dependencies': True,
+                'semgrep': True  # Advanced SAST with data flow analysis
             },
             'output': {
                 'formats': ['text', 'json', 'html', 'sarif'],
@@ -346,6 +347,11 @@ class SecurityScanner:
         result = self.run_scan('scan_secrets.py', str(self.target_path))
         return ('secrets', {'result': result})
 
+    def _run_semgrep_scan(self) -> Tuple[str, Dict]:
+        """Run Semgrep SAST scan - designed for parallel execution"""
+        result = self.run_scan('scan_semgrep.py', str(self.target_path))
+        return ('semgrep', {'result': result})
+
     def run_comprehensive_scan(self):
         """Run all enabled security scans in parallel where possible"""
         print(f"\n🚀 Starting Enhanced Security Scan")
@@ -372,6 +378,10 @@ class SecurityScanner:
 
         if self.config['scan'].get('secrets', True):
             scan_tasks.append(('secrets', lambda: self._run_secrets_scan()))
+
+        # Semgrep SAST scan (provides data flow analysis and taint tracking)
+        if self.config['scan'].get('semgrep', True):
+            scan_tasks.append(('semgrep', lambda: self._run_semgrep_scan()))
 
         # npm scans for each package.json (these can also run in parallel)
         if project_info['nodejs'] and self.config['scan'].get('dependencies', True):
@@ -480,6 +490,62 @@ class SecurityScanner:
                         print(f"✅ Secret Scanner: Found {len(secrets)} potential secrets")
                     else:
                         print(f"⚠️  Secret scan failed: {result['data'].get('error', 'Unknown error')}")
+
+                elif scan_type == 'semgrep':
+                    result = data['result']
+                    self.results['scans_performed'].append('Semgrep SAST')
+                    if result['success']:
+                        vulns = result['data'].get('vulnerabilities', [])
+                        for vuln in vulns:
+                            # Build rich description with CWE/OWASP info
+                            desc = vuln.get('description', vuln.get('message', ''))
+                            cwe = vuln.get('cwe', [])
+                            owasp = vuln.get('owasp', [])
+
+                            if cwe:
+                                cwe_str = ', '.join(str(c) for c in cwe) if isinstance(cwe, list) else str(cwe)
+                                desc = f"{desc} (CWE: {cwe_str})"
+                            if owasp:
+                                owasp_str = ', '.join(str(o) for o in owasp) if isinstance(owasp, list) else str(owasp)
+                                desc = f"{desc} [OWASP: {owasp_str}]"
+
+                            # Include taint analysis info if available
+                            if vuln.get('is_taint_finding'):
+                                taint_info = "[TAINT ANALYSIS] "
+                                if vuln.get('taint_source'):
+                                    src = vuln['taint_source']
+                                    taint_info += f"Source: {src.get('file', '')}:{src.get('line', 0)} -> "
+                                if vuln.get('taint_sink'):
+                                    sink = vuln['taint_sink']
+                                    taint_info += f"Sink: {sink.get('file', '')}:{sink.get('line', 0)}"
+                                desc = f"{taint_info} {desc}"
+
+                            self.results['all_vulnerabilities'].append({
+                                'tool': 'Semgrep',
+                                'severity': self.normalize_severity(vuln.get('severity', 'medium')),
+                                'title': vuln.get('title', vuln.get('rule_id', 'Security Issue')),
+                                'description': desc,
+                                'file': vuln.get('file', 'unknown'),
+                                'line': vuln.get('line', 0),
+                                'column': vuln.get('column', 1),
+                                'code': vuln.get('code', ''),
+                                'fix': vuln.get('fix', ''),
+                                'rule_id': vuln.get('rule_id', ''),
+                                'cwe': cwe,
+                                'owasp': owasp,
+                                'references': vuln.get('references', [])
+                            })
+
+                        taint_count = sum(1 for v in vulns if v.get('is_taint_finding'))
+                        taint_msg = f" ({taint_count} taint findings)" if taint_count > 0 else ""
+                        self.results['files_scanned'] += result['data'].get('files_scanned', 0)
+                        print(f"✅ Semgrep SAST: Found {len(vulns)} issues{taint_msg}")
+                    else:
+                        error = result['data'].get('error', 'Unknown error')
+                        if 'not installed' in error:
+                            print(f"⚠️  Semgrep not installed (skipping SAST scan)")
+                        else:
+                            print(f"⚠️  Semgrep scan failed: {error}")
 
         # Aggregate results by severity
         self.aggregate_results()
@@ -641,6 +707,7 @@ def main():
         print("  --skip-javascript    Skip JavaScript security scan")
         print("  --skip-secrets       Skip secret detection")
         print("  --skip-dependencies  Skip dependency scan")
+        print("  --skip-semgrep       Skip Semgrep SAST scan")
         print("  --format <formats>   Output formats (text,json,html,sarif)")
         print("\nExamples:")
         print("  python run_security_scan.py .")
@@ -676,6 +743,9 @@ def main():
             i += 1
         elif arg == '--skip-dependencies':
             skip_options['dependencies'] = False
+            i += 1
+        elif arg == '--skip-semgrep':
+            skip_options['semgrep'] = False
             i += 1
         else:
             i += 1
