@@ -44,6 +44,9 @@ logs/
 
 # Security scan outputs
 security-report.txt
+security-report.html
+security-results.json
+security-results.sarif
 scan-results/
 
 # Node
